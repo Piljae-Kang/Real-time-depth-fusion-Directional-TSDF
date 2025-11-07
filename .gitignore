@@ -1,0 +1,25 @@
+# 제외할 폴더
+x64/
+Source/
+VoxelSG/output/
+
+# Visual Studio 관련 불필요 파일
+.vs/
+*.vcxproj.user
+*.opendb
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Build / Temp
+bin/
+obj/
+build/
+Debug/
+Release/
+
+# 기타 불필요 파일
+*.ply
+*.png
+*.xyz
