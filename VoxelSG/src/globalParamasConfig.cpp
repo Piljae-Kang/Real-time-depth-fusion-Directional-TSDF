@@ -20,14 +20,17 @@ void GlobalParamsConfig::setDefault() {
     
     // SDF voxel size: Size of each voxel in the Signed Distance Function (meters)
     // g_SDFVoxelSize = 0.004f;
-    g_SDFVoxelSize = 0.004f;
+    //g_SDFVoxelSize = 0.05f;
+    g_SDFVoxelSize = 0.01f;
     
     // SDF marching cubes threshold factor: Threshold factor for triangle generation in Marching Cubes algorithm
     g_SDFMarchingCubeThreshFactor = 10.0f;
     
     // SDF truncation distance
-    //g_SDFTruncation = 0.02f;
-    g_SDFTruncation = 0.08f;
+    //g_SDFTruncation = 0.08f;
+    //g_SDFTruncation = 0.5f;
+    g_SDFTruncation = 0.2f;
+
     
     // SDF truncation scale: Weighted scale factor for truncation (meters)
     g_SDFTruncationScale = 0.01f;
@@ -42,7 +45,8 @@ void GlobalParamsConfig::setDefault() {
     g_SDFIntegrationWeightMax = 255;
 
     // Hash table bucket count: Number of buckets in the hash table storing voxel data
-    g_hashNumSlots = 500000;
+    // g_hashNumSlots = 500000;
+    g_hashNumSlots = 1000000;
     
     // Hash table SDF block count: Maximum number of SDF blocks that can be stored in the hash table
     g_hashNumSDFBlocks = 1000000;

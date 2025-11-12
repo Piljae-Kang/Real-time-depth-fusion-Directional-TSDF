@@ -24,19 +24,20 @@ __device__ inline int3 worldToVirtualVoxelPos(const float3& pos, float voxelSize
                      (int)floorf(p.z + 0.5f * s.z));
 }
 
-// Convert virtual voxel pos to SDF block (8x8x8) with negative correction
+// Convert virtual voxel pos to SDF block with negative correction
 __device__ inline int3 virtualVoxelPosToSDFBlock(int3 v) {
-    if (v.x < 0) v.x -= 7;
-    if (v.y < 0) v.y -= 7;
-    if (v.z < 0) v.z -= 7;
-    return make_int3(v.x / 8, v.y / 8, v.z / 8);
+    const int blockSizeMinusOne = SDF_BLOCK_SIZE - 1;
+    if (v.x < 0) v.x -= blockSizeMinusOne;
+    if (v.y < 0) v.y -= blockSizeMinusOne;
+    if (v.z < 0) v.z -= blockSizeMinusOne;
+    return make_int3(v.x / SDF_BLOCK_SIZE, v.y / SDF_BLOCK_SIZE, v.z / SDF_BLOCK_SIZE);
 }
 
 // Local index inside block (robust modulo)
 __device__ inline int3 virtualVoxelPosToLocal(int3 v) {
-    int lx = ((v.x % 8) + 8) % 8;
-    int ly = ((v.y % 8) + 8) % 8;
-    int lz = ((v.z % 8) + 8) % 8;
+    int lx = ((v.x % SDF_BLOCK_SIZE) + SDF_BLOCK_SIZE) % SDF_BLOCK_SIZE;
+    int ly = ((v.y % SDF_BLOCK_SIZE) + SDF_BLOCK_SIZE) % SDF_BLOCK_SIZE;
+    int lz = ((v.z % SDF_BLOCK_SIZE) + SDF_BLOCK_SIZE) % SDF_BLOCK_SIZE;
     return make_int3(lx, ly, lz);
 }
 
@@ -84,15 +85,15 @@ __device__ VoxelData getVoxel(
         if (slot.ptr == -1) continue;
 
         if (slot.pos.x == blockCoord.x && slot.pos.y == blockCoord.y && slot.pos.z == blockCoord.z) {
-            int voxelIdx = local.x + local.y * 8 + local.z * 64;
+            int voxelIdx = local.x + local.y * SDF_BLOCK_SIZE + local.z * (SDF_BLOCK_SIZE * SDF_BLOCK_SIZE);
 
             //printf("---------------\n");
             //printf("j : %d, slot.ptr : %d\n", j, slot.ptr);
             //printf("worldPos : %f %f %f\n", worldPos.x, worldPos.y, worldPos.z);
             //printf("blockCoord : %d %d %d\n", blockCoord.x, blockCoord.y, blockCoord.z);
             //printf("hp : %d\n", hp);
-            //printf("sdf : %f\n", d_SDFBlocks[slot.ptr * 512 + voxelIdx].sdf);
-            //printf("weight : %f\n", d_SDFBlocks[slot.ptr * 512 + voxelIdx].weight);
+            //printf("sdf : %f\n", d_SDFBlocks[slot.ptr * (SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE) + voxelIdx].sdf);
+            //printf("weight : %f\n", d_SDFBlocks[slot.ptr * (SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE) + voxelIdx].weight);
 
 
 
@@ -103,7 +104,7 @@ __device__ VoxelData getVoxel(
 
 
 
-            return d_SDFBlocks[slot.ptr * 512 + voxelIdx];
+            return d_SDFBlocks[slot.ptr * (SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE) + voxelIdx];
         }
     }
     

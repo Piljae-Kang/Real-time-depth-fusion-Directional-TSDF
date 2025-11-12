@@ -106,7 +106,9 @@ public:
     // Save generated depth map
     bool saveDepthMap(const GeneratedDepthMap& depthmap, 
                      const std::string& outputPath, 
-                     const std::string& prefix = "custom") const;
+                     const std::string& prefix = "custom",
+                     bool saveBinary = true,
+                     bool savePng = false) const;
     
     // Get current camera parameters
     const CameraParams& getCameraParams() const { return cameraParams_; }

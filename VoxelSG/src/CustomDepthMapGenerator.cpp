@@ -4,6 +4,7 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <limits>
 
 namespace fs = std::filesystem;
 
@@ -381,50 +382,162 @@ CustomDepthMapGenerator::GeneratedDepthMap CustomDepthMapGenerator::generateWith
 
 bool CustomDepthMapGenerator::saveDepthMap(const GeneratedDepthMap& depthmap,
                                          const std::string& outputPath,
-                                         const std::string& prefix) const {
+                                         const std::string& prefix,
+                                         bool saveBinary,
+                                         bool savePng) const {
     
+    if (!saveBinary && !savePng) {
+        std::cerr << "CustomDepthMapGenerator::saveDepthMap: No output format selected (binary/png)." << std::endl;
+        return false;
+    }
+
+    if (depthmap.width <= 0 || depthmap.height <= 0) {
+        std::cerr << "CustomDepthMapGenerator::saveDepthMap: Invalid depth map dimensions." << std::endl;
+        return false;
+    }
+
     try {
         // Create output directory if it doesn't exist
         if (!fs::exists(outputPath)) {
             fs::create_directories(outputPath);
         }
         
-        // Save depth map
-        std::string depthPath = outputPath + "/" + prefix + "_depthmap.bin";
-        std::ofstream depthFile(depthPath, std::ios::binary);
-        if (depthFile.is_open()) {
-            depthFile.write(reinterpret_cast<const char*>(&depthmap.width), sizeof(depthmap.width));
-            depthFile.write(reinterpret_cast<const char*>(&depthmap.height), sizeof(depthmap.height));
-            depthFile.write(reinterpret_cast<const char*>(depthmap.depthmap.data()), 
-                          depthmap.depthmap.size() * sizeof(float));  // Fixed: depthmap is vector<float>, not Vec3f
-            depthFile.close();
-            std::cout << "Saved depth map: " << depthPath << std::endl;
-        } else {
-            std::cerr << "Error: Cannot open file for writing: " << depthPath << std::endl;
+        const size_t expectedPixelCount = static_cast<size_t>(depthmap.width) * static_cast<size_t>(depthmap.height);
+
+        if (saveBinary) {
+            // Save depth map
+            std::string depthPath = outputPath + "/" + prefix + "_depthmap.bin";
+            std::ofstream depthFile(depthPath, std::ios::binary);
+            if (depthFile.is_open()) {
+                depthFile.write(reinterpret_cast<const char*>(&depthmap.width), sizeof(depthmap.width));
+                depthFile.write(reinterpret_cast<const char*>(&depthmap.height), sizeof(depthmap.height));
+                if (!depthmap.depthmap.empty()) {
+                    depthFile.write(reinterpret_cast<const char*>(depthmap.depthmap.data()),
+                                    depthmap.depthmap.size() * sizeof(float));
+                }
+                depthFile.close();
+                std::cout << "Saved depth map: " << depthPath << std::endl;
+            } else {
+                std::cerr << "Error: Cannot open file for writing: " << depthPath << std::endl;
+            }
+            
+            // Save normal map
+            std::string normalPath = outputPath + "/" + prefix + "_normalmap.bin";
+            std::ofstream normalFile(normalPath, std::ios::binary);
+            if (normalFile.is_open()) {
+                normalFile.write(reinterpret_cast<const char*>(&depthmap.width), sizeof(depthmap.width));
+                normalFile.write(reinterpret_cast<const char*>(&depthmap.height), sizeof(depthmap.height));
+                if (!depthmap.normalmap.empty()) {
+                    normalFile.write(reinterpret_cast<const char*>(depthmap.normalmap.data()),
+                                     depthmap.normalmap.size() * sizeof(cv::Vec3f));
+                }
+                normalFile.close();
+                std::cout << "Saved normal map: " << normalPath << std::endl;
+            }
+            
+            // Save color map
+            std::string colorPath = outputPath + "/" + prefix + "_colormap.bin";
+            std::ofstream colorFile(colorPath, std::ios::binary);
+            if (colorFile.is_open()) {
+                colorFile.write(reinterpret_cast<const char*>(&depthmap.width), sizeof(depthmap.width));
+                colorFile.write(reinterpret_cast<const char*>(&depthmap.height), sizeof(depthmap.height));
+                if (!depthmap.colormap.empty()) {
+                    colorFile.write(reinterpret_cast<const char*>(depthmap.colormap.data()),
+                                    depthmap.colormap.size() * sizeof(cv::Vec3b));
+                }
+                colorFile.close();
+                std::cout << "Saved color map: " << colorPath << std::endl;
+            }
         }
-        
-        // Save normal map
-        std::string normalPath = outputPath + "/" + prefix + "_normalmap.bin";
-        std::ofstream normalFile(normalPath, std::ios::binary);
-        if (normalFile.is_open()) {
-            normalFile.write(reinterpret_cast<const char*>(&depthmap.width), sizeof(depthmap.width));
-            normalFile.write(reinterpret_cast<const char*>(&depthmap.height), sizeof(depthmap.height));
-            normalFile.write(reinterpret_cast<const char*>(depthmap.normalmap.data()), 
-                           depthmap.normalmap.size() * sizeof(cv::Vec3f));
-            normalFile.close();
-            std::cout << "Saved normal map: " << normalPath << std::endl;
-        }
-        
-        // Save color map
-        std::string colorPath = outputPath + "/" + prefix + "_colormap.bin";
-        std::ofstream colorFile(colorPath, std::ios::binary);
-        if (colorFile.is_open()) {
-            colorFile.write(reinterpret_cast<const char*>(&depthmap.width), sizeof(depthmap.width));
-            colorFile.write(reinterpret_cast<const char*>(&depthmap.height), sizeof(depthmap.height));
-            colorFile.write(reinterpret_cast<const char*>(depthmap.colormap.data()), 
-                          depthmap.colormap.size() * sizeof(cv::Vec3b));
-            colorFile.close();
-            std::cout << "Saved color map: " << colorPath << std::endl;
+
+        if (savePng) {
+            // Depth map PNG (8-bit normalized to match imshow, plus colorized preview)
+            if (!depthmap.depthmap.empty() && depthmap.depthmap.size() >= expectedPixelCount) {
+                const float* depthPtr = depthmap.depthmap.data();
+                double minDepth = std::numeric_limits<double>::max();
+                double maxDepth = std::numeric_limits<double>::lowest();
+
+                for (size_t idx = 0; idx < expectedPixelCount; ++idx) {
+                    float v = depthPtr[idx];
+                    if (v > 0.0f) {
+                        if (v < minDepth) minDepth = v;
+                        if (v > maxDepth) maxDepth = v;
+                    }
+                }
+
+                cv::Mat depthPng(depthmap.height, depthmap.width, CV_8UC1, cv::Scalar(0));
+                if (maxDepth > minDepth && minDepth < std::numeric_limits<double>::max()) {
+                    const double invRange = 255.0 / (maxDepth - minDepth);
+                    for (int y = 0; y < depthmap.height; ++y) {
+                        unsigned char* rowPtr = depthPng.ptr<unsigned char>(y);
+                        for (int x = 0; x < depthmap.width; ++x) {
+                            size_t idx = static_cast<size_t>(y) * depthmap.width + x;
+                            float v = depthPtr[idx];
+                            if (v > 0.0f) {
+                                rowPtr[x] = static_cast<unsigned char>(std::clamp(
+                                    (v - minDepth) * invRange, 0.0, 255.0) + 0.5);
+                            }
+                        }
+                    }
+                }
+
+                std::string depthPngPath = outputPath + "/" + prefix + "_depthmap.png";
+                if (cv::imwrite(depthPngPath, depthPng)) {
+                    std::cout << "Saved depth map PNG: " << depthPngPath << std::endl;
+                } else {
+                    std::cerr << "Error: Failed to write depth map PNG: " << depthPngPath << std::endl;
+                }
+
+                // Optional: colorized depth map for easier inspection
+                cv::Mat colorized;
+                cv::applyColorMap(depthPng, colorized, cv::COLORMAP_JET);
+                std::string depthColorPath = outputPath + "/" + prefix + "_depthmap_color.png";
+                if (cv::imwrite(depthColorPath, colorized)) {
+                    std::cout << "Saved colorized depth map PNG: " << depthColorPath << std::endl;
+                } else {
+                    std::cerr << "Error: Failed to write colorized depth map PNG: " << depthColorPath << std::endl;
+                }
+            }
+
+            // Normal map PNG (RGB 8-bit)
+            if (!depthmap.normalmap.empty() && depthmap.normalmap.size() >= expectedPixelCount) {
+                cv::Mat normalPng(depthmap.height, depthmap.width, CV_8UC3, cv::Scalar(0, 0, 0));
+                auto toByte = [](float value) -> unsigned char {
+                    float mapped = (value * 0.5f + 0.5f) * 255.0f;
+                    mapped = std::clamp(mapped, 0.0f, 255.0f);
+                    return static_cast<unsigned char>(mapped + 0.5f);
+                };
+
+                for (int y = 0; y < depthmap.height; ++y) {
+                    cv::Vec3b* rowPtr = normalPng.ptr<cv::Vec3b>(y);
+                    for (int x = 0; x < depthmap.width; ++x) {
+                        size_t idx = static_cast<size_t>(y) * depthmap.width + x;
+                        const cv::Vec3f& normal = depthmap.normalmap[idx];
+                        rowPtr[x][2] = toByte(normal[0]); // R <- X
+                        rowPtr[x][1] = toByte(normal[1]); // G <- Y
+                        rowPtr[x][0] = toByte(normal[2]); // B <- Z
+                    }
+                }
+
+                std::string normalPngPath = outputPath + "/" + prefix + "_normalmap.png";
+                if (cv::imwrite(normalPngPath, normalPng)) {
+                    std::cout << "Saved normal map PNG: " << normalPngPath << std::endl;
+                } else {
+                    std::cerr << "Error: Failed to write normal map PNG: " << normalPngPath << std::endl;
+                }
+            }
+
+            // Color map PNG (BGR 8-bit)
+            if (!depthmap.colormap.empty() && depthmap.colormap.size() >= expectedPixelCount) {
+                cv::Mat colorPng(depthmap.height, depthmap.width, CV_8UC3,
+                                 const_cast<cv::Vec3b*>(depthmap.colormap.data()));
+                std::string colorPngPath = outputPath + "/" + prefix + "_colormap.png";
+                if (cv::imwrite(colorPngPath, colorPng)) {
+                    std::cout << "Saved color map PNG: " << colorPngPath << std::endl;
+                } else {
+                    std::cerr << "Error: Failed to write color map PNG: " << colorPngPath << std::endl;
+                }
+            }
         }
         
         return true;

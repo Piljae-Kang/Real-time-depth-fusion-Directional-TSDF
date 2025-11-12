@@ -3,6 +3,7 @@
 #include <string>
 #include <iostream>
 
+// #define SDF_BLOCK_SIZE 8
 #define SDF_BLOCK_SIZE 8
 #define HASH_BUCKET_SIZE 10
 

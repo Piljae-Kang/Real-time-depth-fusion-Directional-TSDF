@@ -6,6 +6,43 @@
 
 // CUDA 12.9에서 atomicAdd는 기본적으로 제공됨
 
+#define HASH_SLOT_FREE      (-1)
+#define HASH_BUCKET_UNLOCKED 0
+#define HASH_BUCKET_LOCKED    1
+#define MAX_BUCKET_SPIN    128
+#define MAX_BUCKET_RETRY     4
+
+// ----------------------------------------------------------------------------
+// Host-side debugging helpers
+// ----------------------------------------------------------------------------
+
+static void printGpuMemoryUsage(const char* tag) {
+    size_t freeBytes = 0;
+    size_t totalBytes = 0;
+    cudaError_t err = cudaMemGetInfo(&freeBytes, &totalBytes);
+    if (err != cudaSuccess) {
+        printf("[GPU MEM] %s: cudaMemGetInfo failed (%s)\n", tag, cudaGetErrorString(err));
+        return;
+    }
+
+    double freeGB = static_cast<double>(freeBytes) / (1024.0 * 1024.0 * 1024.0);
+    double totalGB = static_cast<double>(totalBytes) / (1024.0 * 1024.0 * 1024.0);
+    double usedGB = totalGB - freeGB;
+
+    printf("[GPU MEM] %s: used %.2f GB / total %.2f GB (free %.2f GB)\n",
+        tag, usedGB, totalGB, freeGB);
+}
+
+static float computeKernelElapsedMs(cudaEvent_t startEvent, cudaEvent_t stopEvent) {
+    float elapsedMs = 0.0f;
+    cudaError_t err = cudaEventElapsedTime(&elapsedMs, startEvent, stopEvent);
+    if (err != cudaSuccess) {
+        printf("[CUDA EVENT] Failed to compute elapsed time (%s)\n", cudaGetErrorString(err));
+        return 0.0f;
+    }
+    return elapsedMs;
+}
+
 // ============================================================================
 // CUDA Device Functions (helper functions)
 // ============================================================================
@@ -29,6 +66,9 @@ __device__ unsigned int hashBlockCoordinate(int3 blockCoord, int numBuckets) {
  * Implements worldToVirtualVoxelPos + virtualVoxelPosToSDFBlock
  */
 __device__ int3 worldToSDFBlock(const float3& worldPos, float voxelSize) {
+    const int blockSize = SDF_BLOCK_SIZE;
+    const int blockSizeMinusOne = SDF_BLOCK_SIZE - 1;
+
     // worldToVirtualVoxelPos
     float3 virtualVoxelPos = make_float3(worldPos.x / voxelSize, worldPos.y / voxelSize, worldPos.z / voxelSize);
     float3 sign = make_float3(
@@ -43,11 +83,11 @@ __device__ int3 worldToSDFBlock(const float3& worldPos, float voxelSize) {
     );
     
     // virtualVoxelPosToSDFBlock (handle negative coordinates)
-    if (virtualVoxel.x < 0) virtualVoxel.x -= 7;
-    if (virtualVoxel.y < 0) virtualVoxel.y -= 7;
-    if (virtualVoxel.z < 0) virtualVoxel.z -= 7;
+    if (virtualVoxel.x < 0) virtualVoxel.x -= blockSizeMinusOne;
+    if (virtualVoxel.y < 0) virtualVoxel.y -= blockSizeMinusOne;
+    if (virtualVoxel.z < 0) virtualVoxel.z -= blockSizeMinusOne;
     
-    return make_int3(virtualVoxel.x / 8, virtualVoxel.y / 8, virtualVoxel.z / 8);
+    return make_int3(virtualVoxel.x / blockSize, virtualVoxel.y / blockSize, virtualVoxel.z / blockSize);
 }
 
 /**
@@ -55,9 +95,9 @@ __device__ int3 worldToSDFBlock(const float3& worldPos, float voxelSize) {
  */
 __device__ float3 SDFBlockToWorld(const int3& sdfBlock, float voxelSize) {
     return make_float3(
-        sdfBlock.x * 8 * voxelSize,
-        sdfBlock.y * 8 * voxelSize,
-        sdfBlock.z * 8 * voxelSize
+        sdfBlock.x * SDF_BLOCK_SIZE * voxelSize,
+        sdfBlock.y * SDF_BLOCK_SIZE * voxelSize,
+        sdfBlock.z * SDF_BLOCK_SIZE * voxelSize
     );
 }
 
@@ -76,73 +116,133 @@ __device__ float3 computeSign(const float3& v) {
  * Allocate a block in hash table (like expert code)
  * Uses heap counter and heap array to get free block index
  */
-__device__ void allocBlock(HashSlot* d_hashTable, unsigned int* d_heap, unsigned int* d_heapCounter,
-                           const int3& blockCoord, int SDFBlockNum,
-                           int numBuckets, int bucketSize, int totalHashSize,
+__device__ void allocBlock(HashSlot* d_hashTable,
+                           unsigned int* d_heap,
+                           unsigned int* d_heapCounter,
+                           int* d_hashBucketMutex,
+                           const int3& blockCoord,
+                           int SDFBlockNum,
+                           int numBuckets,
+                           int bucketSize,
+                           int totalHashSize,
                            bool debug = false) {
-    // Calculate bucket id
-    unsigned int bucketId = hashBlockCoordinate(blockCoord, numBuckets);
-    unsigned int hp = bucketId * bucketSize; // bucket start position
+    unsigned int baseBucketId = hashBlockCoordinate(blockCoord, numBuckets);
+    unsigned int baseBucketStart = baseBucketId * bucketSize;
 
-    // 1) Probe inside the bucket first - check if already allocated AND find empty slot
-    int firstEmpty = -1;
-    for (int j = 0; j < bucketSize; j++) {
-        unsigned int slotIdx = hp + j;
-        HashSlot* slot = &d_hashTable[slotIdx];
+    for (int retry = 0; retry < MAX_BUCKET_RETRY; ++retry) {
+        int firstEmpty = -1;
 
-        // Check if already allocated at this coord
-        if (slot->pos.x == blockCoord.x && slot->pos.y == blockCoord.y && slot->pos.z == blockCoord.z && slot->ptr != -1) {
-            if (debug) printf("    -> Block already allocated at slot %d\n", slotIdx);
+        // 1) Probe inside the hashed bucket
+        for (int j = 0; j < bucketSize; ++j) {
+            unsigned int slotIdx = baseBucketStart + j;
+            HashSlot* slot = &d_hashTable[slotIdx];
+            int ptr = slot->ptr;
+
+            if (ptr != HASH_SLOT_FREE &&
+                slot->pos.x == blockCoord.x &&
+                slot->pos.y == blockCoord.y &&
+                slot->pos.z == blockCoord.z) {
+                if (debug) printf("    -> Block already allocated at slot %u\n", slotIdx);
+                return;
+            }
+
+            if (firstEmpty == -1 && ptr == HASH_SLOT_FREE) {
+                firstEmpty = slotIdx;
+            }
+        }
+
+        // 2) Fallback: linear probe over entire table (simple open addressing)
+        if (firstEmpty == -1) {
+            for (int i = bucketSize; i < totalHashSize; ++i) {
+                unsigned int slotIdx = (baseBucketStart + i) % totalHashSize;
+                HashSlot* slot = &d_hashTable[slotIdx];
+                int ptr = slot->ptr;
+
+                if (ptr != HASH_SLOT_FREE &&
+                    slot->pos.x == blockCoord.x &&
+                    slot->pos.y == blockCoord.y &&
+                    slot->pos.z == blockCoord.z) {
+                    if (debug) printf("    -> Block already allocated at slot %u (fallback)\n", slotIdx);
+                    return;
+                }
+
+                if (ptr == HASH_SLOT_FREE) {
+                    firstEmpty = slotIdx;
+                    break;
+                }
+            }
+        }
+
+        if (firstEmpty == -1) {
+            if (debug) printf("    -> No empty slot found for coord=(%d,%d,%d)\n",
+                              blockCoord.x, blockCoord.y, blockCoord.z);
             return;
         }
 
-        // Store first empty slot (don't allocate yet!)
-        if (firstEmpty == -1 && slot->ptr == -1) {
-            firstEmpty = slotIdx;
-        }
-    }
+        unsigned int targetBucketId = firstEmpty / bucketSize;
 
-    // 2) Fallback: linear probe over entire table to reduce insertion failure
-    // Also check if already allocated in fallback area
-    if (firstEmpty == -1) {
-        for (int i = bucketSize; i < totalHashSize; i++) {
-            unsigned int slotIdx = (hp + i) % totalHashSize;
-            HashSlot* slot = &d_hashTable[slotIdx];
-            
-            // Check if already allocated
-            if (slot->pos.x == blockCoord.x && slot->pos.y == blockCoord.y && slot->pos.z == blockCoord.z && slot->ptr != -1) {
-                if (debug) printf("    -> Block already allocated at slot %d (fallback)\n", slotIdx);
+        bool lockAcquired = false;
+        for (int spin = 0; spin < MAX_BUCKET_SPIN; ++spin) {
+            int previous = atomicExch(&d_hashBucketMutex[targetBucketId], HASH_BUCKET_LOCKED);
+            if (previous == HASH_BUCKET_UNLOCKED) {
+                lockAcquired = true;
+                break;
+            }
+        }
+
+        if (!lockAcquired) {
+            continue; // retry with a new scan
+        }
+
+        HashSlot* targetSlot = &d_hashTable[firstEmpty];
+        int currentPtr = targetSlot->ptr;
+
+        // Slot might have been filled while we were spinning; double-check
+        if (currentPtr != HASH_SLOT_FREE) {
+            if (targetSlot->pos.x == blockCoord.x &&
+                targetSlot->pos.y == blockCoord.y &&
+                targetSlot->pos.z == blockCoord.z) {
+                if (debug) printf("    -> Block already allocated at slot %d after locking\n", firstEmpty);
+                d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
                 return;
             }
-            
-            // Find first empty slot
-            if (slot->ptr == -1) {
-                firstEmpty = slotIdx;
-                break; // Found empty slot, can allocate now
+
+            d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
+            continue; // try again to find another empty slot
+        }
+
+        unsigned int heapIndex = atomicSub((unsigned int*)d_heapCounter, 1);
+        if (heapIndex > 0 && heapIndex < (unsigned int)SDFBlockNum) {
+            unsigned int blockIndex = d_heap[heapIndex];
+            targetSlot->pos = blockCoord;
+            targetSlot->offset = 0;
+            __threadfence();
+            targetSlot->ptr = static_cast<int>(blockIndex);
+            __threadfence();
+
+            if (debug) {
+                printf("    -> Allocated block #%u from heap[%u] at slot %d, coord=(%d,%d,%d)\n",
+                       blockIndex, heapIndex, firstEmpty,
+                       blockCoord.x, blockCoord.y, blockCoord.z);
             }
+
+            d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
+            return;
+        } else {
+            // Out of memory - restore counter and release lock
+            atomicAdd((unsigned int*)d_heapCounter, 1);
+            if (debug) {
+                printf("    -> Out of memory! heapIndex=%u (must be > 0 and < %d)\n",
+                       heapIndex, SDFBlockNum);
+            }
+            d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
+            return;
         }
     }
 
-    // 3) Allocate if we found an empty slot
-    if (firstEmpty != -1) {
-        HashSlot* slot = &d_hashTable[firstEmpty];
-        // Use atomicSub to decrement heap counter (returns old value BEFORE decrement)
-        unsigned int heapIndex = atomicSub((unsigned int*)d_heapCounter, 1);
-        // Check if we have valid heap index (heapIndex should be > 0 and < SDFBlockNum)
-        if (heapIndex > 0 && heapIndex < (unsigned int)SDFBlockNum) {
-            unsigned int blockIndex = d_heap[heapIndex];
-            slot->pos = blockCoord;
-            slot->ptr = blockIndex;
-            slot->offset = 0;
-            if (debug) printf("    -> Allocated block #%d from heap[%d] at slot %d, coord=(%d,%d,%d)\n",
-                              blockIndex, heapIndex, firstEmpty, blockCoord.x, blockCoord.y, blockCoord.z);
-        } else {
-            // Out of memory - restore counter
-            atomicAdd((unsigned int*)d_heapCounter, 1);
-            if (debug) printf("    -> Out of memory! heapIndex=%d (must be > 0 and < %d)\n", heapIndex, SDFBlockNum);
-        }
-    } else if (debug) {
-        printf("    -> No empty slot found!\n");
+    if (debug) {
+        printf("    -> Failed to acquire bucket lock after %d retries for coord=(%d,%d,%d)\n",
+               MAX_BUCKET_RETRY, blockCoord.x, blockCoord.y, blockCoord.z);
     }
 }
 
@@ -186,6 +286,7 @@ __device__ void allocateBlocksAlongRay(
     HashSlot* d_hashTable,
     unsigned int* d_heap,
     unsigned int* d_heapCounter,
+    int* d_hashBucketMutex,
     float3 rayStart,
     float3 rayEnd,
     float voxelSize,
@@ -251,15 +352,16 @@ __device__ void allocateBlocksAlongRay(
     );
     
     // Expert code: boundaryPos = SDFBlockToWorld(idCurrentVoxel + clamp(step, 0, 1)) - 0.5f * voxelSize
+    float blockExtent = static_cast<float>(SDF_BLOCK_SIZE) * voxelSize;
     float3 stepClamped = make_float3(
         (step.x > 0) ? 1.0f : 0.0f,
         (step.y > 0) ? 1.0f : 0.0f,
         (step.z > 0) ? 1.0f : 0.0f
     );
     float3 boundaryPos = make_float3(
-        (idCurrentVoxel.x + stepClamped.x) * 8 * voxelSize - 0.5f * voxelSize,
-        (idCurrentVoxel.y + stepClamped.y) * 8 * voxelSize - 0.5f * voxelSize,
-        (idCurrentVoxel.z + stepClamped.z) * 8 * voxelSize - 0.5f * voxelSize
+        (idCurrentVoxel.x + stepClamped.x) * blockExtent - 0.5f * voxelSize,
+        (idCurrentVoxel.y + stepClamped.y) * blockExtent - 0.5f * voxelSize,
+        (idCurrentVoxel.z + stepClamped.z) * blockExtent - 0.5f * voxelSize
     );
 
     float3 tMax = make_float3(
@@ -269,9 +371,9 @@ __device__ void allocateBlocksAlongRay(
     );
 
     float3 tDelta = make_float3(
-        (step.x * 8 * voxelSize) / rayDir.x,
-        (step.y * 8 * voxelSize) / rayDir.y,
-        (step.z * 8 * voxelSize) / rayDir.z
+        (step.x * blockExtent) / rayDir.x,
+        (step.y * blockExtent) / rayDir.y,
+        (step.z * blockExtent) / rayDir.z
     );
 
     // Handle zero direction components
@@ -281,9 +383,9 @@ __device__ void allocateBlocksAlongRay(
 
     // Debug: Track world position of current block center
     float3 currentWorldPos = make_float3(
-        (idCurrentVoxel.x + 0.5f) * 8 * voxelSize,
-        (idCurrentVoxel.y + 0.5f) * 8 * voxelSize,
-        (idCurrentVoxel.z + 0.5f) * 8 * voxelSize
+        (idCurrentVoxel.x + 0.5f) * blockExtent,
+        (idCurrentVoxel.y + 0.5f) * blockExtent,
+        (idCurrentVoxel.z + 0.5f) * blockExtent
     );
 
     // Debug flag: log for first few pixels to see allocation pattern
@@ -316,7 +418,16 @@ __device__ void allocateBlocksAlongRay(
         if (shouldDebug) {
             printf("  Before allocBlock: iter=%d, blockCoord=(%d,%d,%d)\n", iter, blockCoord.x, blockCoord.y, blockCoord.z);
         }
-        allocBlock(d_hashTable, d_heap, d_heapCounter, blockCoord, SDFBlockNum, numBuckets, bucketSize, totalHashSize, shouldDebug);
+        allocBlock(d_hashTable,
+                   d_heap,
+                   d_heapCounter,
+                   d_hashBucketMutex,
+                   blockCoord,
+                   SDFBlockNum,
+                   numBuckets,
+                   bucketSize,
+                   totalHashSize,
+                   shouldDebug);
         
         // Note: Expert code doesn't allocate neighboring blocks in the main allocation loop
         
@@ -356,6 +467,7 @@ __global__ void allocBlocksFromDepthMapMethod1Kernel(
     HashSlot* d_hashTable,
     unsigned int* d_heap,
     unsigned int* d_heapCounter,
+    int* d_hashBucketMutex,
     const float3* depthmap,
     int width, int height,
     float truncationDistance,
@@ -480,6 +592,7 @@ __global__ void allocBlocksFromDepthMapMethod1Kernel(
         d_hashTable,
         d_heap,
         d_heapCounter,
+        d_hashBucketMutex,
         rayMin,
         rayMax,
         voxelSize,
@@ -540,6 +653,7 @@ __global__ void allocBlocksFromDepthMapMethod2Kernel(
     HashSlot* d_hashTable,
     unsigned int* d_heap,
     unsigned int* d_heapCounter,
+    int* d_hashBucketMutex,
     const float3* depthmap,
     const float3* normalmap,
     int width, int height,
@@ -632,6 +746,7 @@ __global__ void allocBlocksFromDepthMapMethod2Kernel(
         d_hashTable,
         d_heap,
         d_heapCounter,
+        d_hashBucketMutex,
         rayStart,
         rayEnd,
         voxelSize,
@@ -659,6 +774,7 @@ __global__ void allocBlocksFromDepthMapMethod2Kernel(
         d_hashTable,
         d_heap,
         d_heapCounter,
+        d_hashBucketMutex,
         normalRayStart,
         normalRayEnd,
         voxelSize,
@@ -675,7 +791,7 @@ __global__ void allocBlocksFromDepthMapMethod2Kernel(
 
 /**
  * Improved integration kernel using reverse projection (like expert code)
- * Each thread processes one voxel within a block (8x8x8 = 512 threads per block)
+ * Each thread processes one voxel within a block (SDF_BLOCK_SIZE^3 threads per block)
  */
 __global__ void integrateDepthMapIntoBlocksKernel(
     HashSlot* d_hashCompactified,
@@ -701,22 +817,25 @@ __global__ void integrateDepthMapIntoBlocksKernel(
     HashSlot slot = d_hashCompactified[activeBlockIdx];
 
     int3 blockCoord = slot.pos;
-    // Each SDF block contains 8x8x8 = 512 voxels; slot.ptr is the block index
-    VoxelData* block = d_SDFBlocks + (slot.ptr * 512);
+    const int blockSize = SDF_BLOCK_SIZE;
+    const int voxelsPerBlock = blockSize * blockSize * blockSize;
+    // Each SDF block contains SDF_BLOCK_SIZE^3 voxels; slot.ptr is the block index
+    VoxelData* block = d_SDFBlocks + (slot.ptr * voxelsPerBlock);
 
-    // Each thread processes one voxel within the block (8x8x8 = 512 voxels)
-    uint voxelIdx = threadIdx.x; // Index within the block (0-511)
+    // Each thread processes one voxel within the block (SDF_BLOCK_SIZE^3 voxels)
+    uint voxelIdx = threadIdx.x;
+    if (voxelIdx >= voxelsPerBlock) return;
 
     // Convert linear voxel index to 3D coordinates within block
-    int localX = voxelIdx % 8;
-    int localY = (voxelIdx / 8) % 8;
-    int localZ = voxelIdx / 64;
+    int localX = voxelIdx % blockSize;
+    int localY = (voxelIdx / blockSize) % blockSize;
+    int localZ = voxelIdx / (blockSize * blockSize);
 
     // Calculate world position of this voxel
     float3 voxelWorldPos = make_float3(
-        (blockCoord.x * 8 + localX) * voxelSize,
-        (blockCoord.y * 8 + localY) * voxelSize,
-        (blockCoord.z * 8 + localZ) * voxelSize
+        (blockCoord.x * blockSize + localX) * voxelSize,
+        (blockCoord.y * blockSize + localY) * voxelSize,
+        (blockCoord.z * blockSize + localZ) * voxelSize
     );
 
     // Apply inverse camera transform to transform voxel world position to camera space
@@ -933,6 +1052,11 @@ extern "C" void resetHashDataCUDA(CUDAHashRef & hashData, const Params & params)
         // Launch kernel
         initHashTableKernel << <numBlocks, blockSize >> > (hashData.d_hashTable, params.totalHashSize);
     }
+
+    // Reset bucket mutexes
+    if (hashData.d_hashBucketMutex) {
+        cudaMemset(hashData.d_hashBucketMutex, HASH_BUCKET_UNLOCKED, params.hashSlotNum * sizeof(int));
+    }
     
     // Initialize compactified hash table
     if (hashData.d_CompactifiedHashTable) {
@@ -1035,13 +1159,44 @@ extern "C" void compactifyHashCUDA(CUDAHashRef & hashData, const Params & params
 
     printf("  Grid size: %d, Block size: %d\n", gridSize.x, blockSize.x);
 
-    // Launch compactification kernel
-    compactifyHashKernel << <gridSize, blockSize >> > (
+    printGpuMemoryUsage("Before compactifyHash kernel");
+
+    cudaEvent_t startEvent = nullptr;
+    cudaEvent_t stopEvent = nullptr;
+    cudaEventCreate(&startEvent);
+    cudaEventCreate(&stopEvent);
+    cudaEventRecord(startEvent);
+
+    compactifyHashKernel<<<gridSize, blockSize>>>(
         hashData.d_hashTable,
         hashData.d_CompactifiedHashTable,
         hashData.d_hashCompactifiedCounter,
         params.totalHashSize
-        );
+    );
+
+    cudaEventRecord(stopEvent);
+
+    cudaError_t launchErr = cudaGetLastError();
+    if (launchErr != cudaSuccess) {
+        printf("  ERROR: CUDA compactification kernel launch failed: %s\n", cudaGetErrorString(launchErr));
+        cudaEventDestroy(startEvent);
+        cudaEventDestroy(stopEvent);
+        return;
+    }
+
+    cudaError_t eventSyncErr = cudaEventSynchronize(stopEvent);
+    if (eventSyncErr != cudaSuccess) {
+        printf("  ERROR: CUDA compactification event sync failed: %s\n", cudaGetErrorString(eventSyncErr));
+        cudaEventDestroy(startEvent);
+        cudaEventDestroy(stopEvent);
+        return;
+    }
+
+    float kernelElapsedMs = computeKernelElapsedMs(startEvent, stopEvent);
+    cudaEventDestroy(startEvent);
+    cudaEventDestroy(stopEvent);
+
+    printGpuMemoryUsage("After compactifyHash kernel");
 
     // Check for errors
     cudaError_t err = cudaDeviceSynchronize();
@@ -1071,6 +1226,7 @@ extern "C" void compactifyHashCUDA(CUDAHashRef & hashData, const Params & params
     }
 
     printf("compactifyHashCUDA: Compaction completed!\n");
+    printf("  Kernel execution time: %.3f ms\n", kernelElapsedMs);
     printf("  Active blocks: %d\n", numCompactified);
     printf("  Total allocated blocks: %u (max: %d, used: %.1f%%)\n",
         totalAllocatedBlocks, params.SDFBlockNum,
@@ -1121,6 +1277,8 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
         printf("  WARNING: CUDA error before kernel launch: %s\n", cudaGetErrorString(preErr));
     }
 
+    printGpuMemoryUsage("Before Method1 allocation");
+
     // Read heap counter BEFORE allocation to track newly allocated blocks
     unsigned int heapCounterBefore = 0;
     cudaMemcpy(&heapCounterBefore, hashData.d_heapCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost);
@@ -1134,11 +1292,18 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
     cudaMalloc(&d_validPixelCounter, sizeof(int));
     cudaMemset(d_validPixelCounter, 0, sizeof(int));
 
+    cudaEvent_t startEvent = nullptr;
+    cudaEvent_t stopEvent = nullptr;
+    cudaEventCreate(&startEvent);
+    cudaEventCreate(&stopEvent);
+    cudaEventRecord(startEvent);
+
     // Launch allocation kernel (Method 1)
     allocBlocksFromDepthMapMethod1Kernel<<<gridSize, blockSize>>>(
         hashData.d_hashTable,
         hashData.d_heap,
         hashData.d_heapCounter,
+        hashData.d_hashBucketMutex,
         depthmap,
         width,
         height,
@@ -1153,15 +1318,32 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
         d_validPixelCounter
     );
 
+    cudaEventRecord(stopEvent);
+
     // Check for errors (check kernel launch error first)
     cudaError_t launchErr = cudaGetLastError();
     if (launchErr != cudaSuccess) {
         printf("  ERROR: CUDA kernel launch failed: %s\n", cudaGetErrorString(launchErr));
         cudaFree(d_validPixelCounter);
+        cudaEventDestroy(startEvent);
+        cudaEventDestroy(stopEvent);
         return;
     }
 
-    // Synchronize and check for execution errors
+    cudaError_t eventSyncErr = cudaEventSynchronize(stopEvent);
+    if (eventSyncErr != cudaSuccess) {
+        printf("  ERROR: CUDA event sync failed: %s\n", cudaGetErrorString(eventSyncErr));
+        cudaFree(d_validPixelCounter);
+        cudaEventDestroy(startEvent);
+        cudaEventDestroy(stopEvent);
+        return;
+    }
+
+    float kernelElapsedMs = computeKernelElapsedMs(startEvent, stopEvent);
+    cudaEventDestroy(startEvent);
+    cudaEventDestroy(stopEvent);
+
+    // Synchronize and check for execution errors (extra safety)
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         printf("  ERROR: CUDA kernel execution failed: %s\n", cudaGetErrorString(err));
@@ -1169,7 +1351,7 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
         return;
     }
     
-    printf("  Kernel execution completed successfully\n");
+    printf("  Kernel execution completed successfully (%.3f ms)\n", kernelElapsedMs);
 
     // Read back valid pixel counter
     int numValidPixels = 0;
@@ -1199,7 +1381,7 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
     printf("  Valid pixels processed: %d\n", numValidPixels);
     printf("  Heap counter: before=%u, after=%u\n", heapCounterBefore, heapCounterAfter);
     printf("  NEWLY allocated blocks in this frame: %u\n", newlyAllocatedBlocks);
-    printf("  NEWLY allocated voxels in this frame: %u (blocks * 512)\n", newlyAllocatedBlocks * 512);
+    printf("  NEWLY allocated voxels in this frame: %u (blocks * %d)\n", newlyAllocatedBlocks * (SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE), SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE);
     printf("  Total allocated blocks: %u (max: %d, used: %.1f%%)\n",
         totalAllocatedAfter, params.SDFBlockNum, (float)totalAllocatedAfter / params.SDFBlockNum * 100.0f);
 
@@ -1211,6 +1393,8 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
     if (totalAllocatedAfter >= params.SDFBlockNum) {
         printf("  WARNING: Reached maximum block limit! (%u >= %d)\n", totalAllocatedAfter, params.SDFBlockNum);
     }
+
+    printGpuMemoryUsage("After Method1 allocation");
 }
 
 /**
@@ -1239,11 +1423,20 @@ extern "C" void allocBlocksFromDepthMapMethod2CUDA(
 
     printf("  Grid size: %d, Block size: %d\n", gridSize.x, blockSize.x);
 
+    printGpuMemoryUsage("Before Method2 allocation");
+
+    cudaEvent_t startEvent = nullptr;
+    cudaEvent_t stopEvent = nullptr;
+    cudaEventCreate(&startEvent);
+    cudaEventCreate(&stopEvent);
+    cudaEventRecord(startEvent);
+
     // Launch Method 2 allocation kernel
     allocBlocksFromDepthMapMethod2Kernel<<<gridSize, blockSize>>>(
         hashData.d_hashTable,
         hashData.d_heap,
         hashData.d_heapCounter,
+        hashData.d_hashBucketMutex,
         depthmap,
         normalmap,
         width,
@@ -1258,6 +1451,28 @@ extern "C" void allocBlocksFromDepthMapMethod2CUDA(
         cameraTransform
     );
 
+    cudaEventRecord(stopEvent);
+
+    cudaError_t launchErr = cudaGetLastError();
+    if (launchErr != cudaSuccess) {
+        printf("CUDA Method 2 allocation kernel launch error: %s\n", cudaGetErrorString(launchErr));
+        cudaEventDestroy(startEvent);
+        cudaEventDestroy(stopEvent);
+        return;
+    }
+
+    cudaError_t eventSyncErr = cudaEventSynchronize(stopEvent);
+    if (eventSyncErr != cudaSuccess) {
+        printf("CUDA Method 2 allocation event sync error: %s\n", cudaGetErrorString(eventSyncErr));
+        cudaEventDestroy(startEvent);
+        cudaEventDestroy(stopEvent);
+        return;
+    }
+
+    float kernelElapsedMs = computeKernelElapsedMs(startEvent, stopEvent);
+    cudaEventDestroy(startEvent);
+    cudaEventDestroy(stopEvent);
+
     // Check for errors
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
@@ -1265,7 +1480,8 @@ extern "C" void allocBlocksFromDepthMapMethod2CUDA(
         return;
     }
 
-    printf("allocBlocksFromDepthMapMethod2CUDA: Normal direction allocation completed!\n");
+    printf("allocBlocksFromDepthMapMethod2CUDA: Normal direction allocation completed! (%.3f ms)\n", kernelElapsedMs);
+    printGpuMemoryUsage("After Method2 allocation");
 }
 
 /**
@@ -1317,16 +1533,24 @@ extern "C" void integrateDepthMapIntoBlocksCUDA(
     }
 
     // Set up grid and block dimensions (like expert code)
-    // Each CUDA block processes one SDF block, with 512 threads (8x8x8 voxels)
-    const unsigned int threadsPerBlock = 8 * 8 * 8; // 512 threads per block
+    // Each CUDA block processes one SDF block, with SDF_BLOCK_SIZE^3 threads
+    const unsigned int threadsPerBlock = SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE;
     dim3 gridSize(numActiveBlocks, 1);
     dim3 blockSize(threadsPerBlock, 1);
 
     printf("  Active blocks: %d\n", numActiveBlocks);
-    printf("  Grid size: %d, Block size: %d (512 threads per block)\n", gridSize.x, blockSize.x);
+    printf("  Grid size: %d, Block size: %d (%d threads per block)\n", gridSize.x, blockSize.x, threadsPerBlock);
+
+    printGpuMemoryUsage("Before integrateDepthMapIntoBlocks kernel");
+
+    cudaEvent_t startEvent = nullptr;
+    cudaEvent_t stopEvent = nullptr;
+    cudaEventCreate(&startEvent);
+    cudaEventCreate(&stopEvent);
+    cudaEventRecord(startEvent);
 
     // Launch integration kernel (like expert code)
-    integrateDepthMapIntoBlocksKernel << <gridSize, blockSize >> > (
+    integrateDepthMapIntoBlocksKernel<<<gridSize, blockSize>>>(
         hashData.d_CompactifiedHashTable,
         hashData.d_SDFBlocks,
         depthmap,
@@ -1340,7 +1564,29 @@ extern "C" void integrateDepthMapIntoBlocksCUDA(
         cameraPos,
         cameraTransform,
         fx, fy, cx, cy
-        );
+    );
+
+    cudaEventRecord(stopEvent);
+
+    cudaError_t launchErr = cudaGetLastError();
+    if (launchErr != cudaSuccess) {
+        printf("CUDA integration kernel launch error: %s\n", cudaGetErrorString(launchErr));
+        cudaEventDestroy(startEvent);
+        cudaEventDestroy(stopEvent);
+        return;
+    }
+
+    cudaError_t eventSyncErr = cudaEventSynchronize(stopEvent);
+    if (eventSyncErr != cudaSuccess) {
+        printf("CUDA integration kernel event sync error: %s\n", cudaGetErrorString(eventSyncErr));
+        cudaEventDestroy(startEvent);
+        cudaEventDestroy(stopEvent);
+        return;
+    }
+
+    float kernelElapsedMs = computeKernelElapsedMs(startEvent, stopEvent);
+    cudaEventDestroy(startEvent);
+    cudaEventDestroy(stopEvent);
 
     // Check for errors
     cudaError_t err = cudaDeviceSynchronize();
@@ -1349,7 +1595,8 @@ extern "C" void integrateDepthMapIntoBlocksCUDA(
         return;
     }
 
-    printf("integrateDepthMapIntoBlocksCUDA: Integration completed successfully!\n");
+    printf("integrateDepthMapIntoBlocksCUDA: Integration completed successfully! (%.3f ms)\n", kernelElapsedMs);
     printf("  Integrated SDF data into %d active blocks\n", numActiveBlocks);
-    printf("  Total voxels updated: %d (512 voxels per block)\n", numActiveBlocks * 512);
+    printf("  Total voxels updated: %d (%d voxels per block)\n", numActiveBlocks * (int)threadsPerBlock, threadsPerBlock);
+    printGpuMemoryUsage("After integrateDepthMapIntoBlocks kernel");
 }

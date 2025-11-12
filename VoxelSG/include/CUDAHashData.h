@@ -13,11 +13,11 @@ struct Params {
 		SDFBlockNum = gpc.g_hashNumSDFBlocks;
 		hashSlotNum = gpc.g_hashNumSlots;
 
-		SDFBlockSize = SDF_BLOCK_SIZE;          // Size of each voxel block (8x8x8)
+		SDFBlockSize = SDF_BLOCK_SIZE;          // Size of each voxel block (SDF_BLOCK_SIZE^3)
 		slotSize = HASH_BUCKET_SIZE;            // Hash bucket size
 
 		totalHashSize = gpc.g_hashNumSlots * HASH_BUCKET_SIZE;  // Total hash entries
-		totalBlockSize = gpc.g_hashNumSDFBlocks * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE;  // Total voxels: N x (8x8x8)
+		totalBlockSize = gpc.g_hashNumSDFBlocks * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE;  // Total voxels: N x (SDF_BLOCK_SIZE^3)
 		
 		voxelSize = gpc.g_SDFVoxelSize;
 		//voxelSize = 0.004;

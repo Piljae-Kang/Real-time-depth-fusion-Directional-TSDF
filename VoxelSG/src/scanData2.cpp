@@ -5,7 +5,7 @@ ScanDataLoader2::ScanDataLoader2(std::string filepath) {
 
 	dataPath_ = filepath;
 	startIdx_ = 0;
-	frameN_ = 50;
+	frameN_ = 100;
 	//frameN_ = 50; // Must be deleted later
 
 	// Initialize default/empty params for compatibility
@@ -287,12 +287,14 @@ void ScanDataLoader2::loadPointCloudFormat(const std::string& formatPath, PointC
 		
 		// Original point in local coordinates
 		cv::Point3f localPoint(p(0), p(1), p(2));
+
+		float sclae_factor = 1.2f;
 		
 		// Transform point from local to camera coordinates
 		cv::Mat pointHomogeneous = (cv::Mat_<float>(4, 1) << 
-			localPoint.x,
-			localPoint.y,
-			localPoint.z,
+			localPoint.x / sclae_factor,
+			localPoint.y / sclae_factor,
+			localPoint.z / sclae_factor,
 			1.0f);
 		
 		cv::Mat cameraPoint = localToCamera * pointHomogeneous;

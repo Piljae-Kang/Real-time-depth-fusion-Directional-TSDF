@@ -141,6 +141,11 @@ public:
     }
 
     /**
+     * Get per-run output directory path (lazy-initialized).
+     */
+    std::string getOutputDirectory() const;
+
+    /**
      * Get const Params reference
      * @return Const Params struct reference
      */
@@ -167,6 +172,16 @@ private:
     void allocate();
 
     /**
+     * Prepare timestamped output directory for logs and dumps.
+     */
+    void initializeOutputDirectory();
+
+    /**
+     * Write current global parameters into the active output directory.
+     */
+    void writeGlobalParametersLog() const;
+
+    /**
      * Free HashData memory
      */
     void deallocate();
@@ -188,4 +203,5 @@ private:
     CUDAHashRef m_hashData;             // GPU memory (hash table, heap, etc.)
     unsigned int m_numIntegratedFrames; // Number of integrated frames
     bool m_isAllocated;                 // Memory allocation status
+    std::string m_outputDirectory; // Per-run output directory
 };

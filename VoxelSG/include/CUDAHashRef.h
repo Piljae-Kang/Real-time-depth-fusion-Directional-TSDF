@@ -21,25 +21,25 @@ struct HashSlot {
 struct VoxelData {
     uchar3 color;          // RGB color
     uchar weight;          // Integration confidence/weight
-    float prev_sdf;        // Previous SDF distance
+    // float prev_sdf;        // Previous SDF distance (unused)
     float sdf;             // Current SDF distance
-    uchar prev_weight;     // Previous weight
-    uchar isUpdated;       // Update flag
-    uchar isZeroCrossing;  // Surface flag (zero crossing)
-    uchar patch_bit;       // Patch flag
+    // uchar prev_weight;     // Previous weight (unused)
+    uchar isUpdated;       // Update flag (unused)
+    uchar isZeroCrossing;  // Surface flag (unused)
+    // uchar patch_bit;       // Patch flag (unused)
 
-    // Directional TSDF fields
-    uchar dir_id0;         // Primary direction ID
-    uchar dir_w0;          // Primary direction weight
-    float dtsdf0;          // Primary directional distance
-    uchar dir_id1;         // Secondary direction ID
-    uchar dir_w1;          // Secondary direction weight
-    float dtsdf1;          // Secondary directional distance
+    // Directional TSDF fields (unused)
+    // uchar dir_id0;
+    // uchar dir_w0;
+    // float dtsdf0;
+    // uchar dir_id1;
+    // uchar dir_w1;
+    // float dtsdf1;
     
-    // Parent tracking for Method 2 (normal direction allocation)
-    int parentPixelX;      // Parent depth pixel X coordinate
-    int parentPixelY;      // Parent depth pixel Y coordinate
-    uchar allocationMethod; // 0: Method 1 (camera direction), 1: Method 2 (normal direction)
+    // Parent tracking for Method 2 (unused)
+    // int parentPixelX;
+    // int parentPixelY;
+    // uchar allocationMethod;
 };
 
 /**

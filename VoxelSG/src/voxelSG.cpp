@@ -105,6 +105,24 @@ int main(){
     // Transform and visualize PCD in World coordinates
     TransformAndVisualizePCDInWorld(loader, 0);
         
+    // =============================================================================
+    // Initialize Global Parameters and VoxelScene (before any file outputs)
+    // =============================================================================
+    std::cout << "\n=== Initializing VoxelScene ===" << std::endl;
+
+    GlobalParamsConfig::get().initialize();
+    GlobalParamsConfig::get().print();
+
+    Params params(GlobalParamsConfig::get());
+
+    std::cout << "\n=== Creating VoxelScene ===" << std::endl;
+
+    VoxelScene scene(params);
+    std::cout << "VoxelScene created successfully" << std::endl;
+    scene.printStats();
+
+    const std::string runOutputDir = scene.getOutputDirectory();
+        
     // === Custom Depth Map Generation Example ===
     std::cout << "\n=== Custom Depth Map Generation ===" << std::endl;
         
@@ -118,7 +136,7 @@ int main(){
     const auto& allPointCloudFrames = loader.getAllPointCloudParams();
 
     // Limit test_idx to actual available frames
-    int test_idx = (std::min)(20, static_cast<int>(allPointCloudFrames.size()));
+    int test_idx = (std::min)(90, static_cast<int>(allPointCloudFrames.size()));
     if (test_idx == 0) {
         std::cerr << "No point cloud frames available!" << std::endl;
         return -1;
@@ -128,6 +146,8 @@ int main(){
     
     // Store generated depth maps for all frames (similar to PCD structure)
     CustomDepthMapGenerator::GeneratedDepthMapFrames allGeneratedDepthMaps;
+
+    bool Debugging_pcd = false;
 
     for (int i = 0; i < test_idx; i++) {
         
@@ -156,11 +176,16 @@ int main(){
             allGeneratedDepthMaps.src_0.push_back(customDepthMap);
 
             // Visualize custom generated depth map
-            VisualizeCustomDepthMap(customDepthMap);
+            VisualizeCustomDepthMap(customDepthMap, runOutputDir, "custom0");
 
             // Save custom depth map
-            std::string frameSuffix = "_frame" + std::to_string(i);
-            customGenerator.saveDepthMap(customDepthMap, "output/custom_depthmap", "custom_generated" + frameSuffix);
+            //std::string frameSuffix = "_frame" + std::to_string(i);
+            //customGenerator.saveDepthMap(
+            //    customDepthMap,
+            //    runOutputDir + "/custom_depthmap",
+            //    "custom_generated" + frameSuffix,
+            //    false,
+            //    true);
         }
 
         // Generate depth map from 45-degree point cloud (also in camera coordinates)
@@ -178,11 +203,16 @@ int main(){
             allGeneratedDepthMaps.src_45.push_back(customDepthMap45);
 
             // Visualize 45-degree depth map
-            VisualizeCustomDepthMap(customDepthMap45);
+            //VisualizeCustomDepthMap(customDepthMap45, runOutputDir, "custom45");
 
             // Save 45-degree depth map
-            std::string frameSuffix = "_frame" + std::to_string(i);
-            customGenerator.saveDepthMap(customDepthMap45, "output/custom_depthmap", "custom_45_degree" + frameSuffix);
+            //std::string frameSuffix = "_frame" + std::to_string(i);
+            //customGenerator.saveDepthMap(
+            //    customDepthMap45,
+            //    runOutputDir + "/custom_depthmap",
+            //    "custom_45_degree" + frameSuffix,
+            //    false,
+            //    true);
         }
 
         // Optional: Process additional frames if available
@@ -204,10 +234,16 @@ int main(){
         // src_0 pcd visualization
         if (!pointCloudParams.src_0.points.empty() && i % 10 == 0) {
             std::cout << "\n=== src_0 Point Cloud Visualization ===" << std::endl;
-            VisualizePointCloudWithOpen3D(pointCloudParams.src_0.points,
-                pointCloudParams.src_0.normals,
-                pointCloudParams.src_0.colors,
-                "VoxelSG_src_0");
+
+            if (Debugging_pcd) {
+
+                VisualizePointCloudWithOpen3D(pointCloudParams.src_0.points,
+                    pointCloudParams.src_0.normals,
+                    pointCloudParams.src_0.colors,
+                    "VoxelSG_src_0");
+            }
+
+
         }
         else {
             std::cout << "src_0 point cloud is empty." << std::endl;
@@ -216,10 +252,18 @@ int main(){
         // src_45 pcd visualization
         if (!pointCloudParams.src_45.points.empty() && i % 10 == 0) {
             std::cout << "\n=== src_45 Point Cloud Visualization ===" << std::endl;
-            VisualizePointCloudWithOpen3D(pointCloudParams.src_45.points,
-                pointCloudParams.src_45.normals,
-                pointCloudParams.src_45.colors,
-                "VoxelSG_src_45");
+
+
+            if (Debugging_pcd) {
+
+                VisualizePointCloudWithOpen3D(pointCloudParams.src_45.points,
+                    pointCloudParams.src_45.normals,
+                    pointCloudParams.src_45.colors,
+                    "VoxelSG_src_45");
+
+
+            }
+
         }
         else {
             std::cout << "src_45 point cloud is empty." << std::endl;
@@ -238,38 +282,7 @@ int main(){
     // allGeneratedDepthMaps.src_0[frameIndex] for src_0 depth map of specific frame
     // allGeneratedDepthMaps.src_45[frameIndex] for src_45 depth map of specific frame
         
-    // =============================================================================
-    // Initialize Global Parameters and VoxelScene
-    // =============================================================================
-    
-    std::cout << "\n=== Initializing VoxelScene ===" << std::endl;
-    
-    // Initialize global parameters
-    GlobalParamsConfig::get().initialize();
-    GlobalParamsConfig::get().print();
-    
-    // Create Params from GlobalParamsConfig
-    Params params(GlobalParamsConfig::get());
-    
-    std::cout << "\n=== Creating VoxelScene ===" << std::endl;
-
-
-
-    
     try {
-        // Create VoxelScene (this will allocate GPU memory and initialize)
-        VoxelScene scene(params);
-        
-        // VoxelScene created successfully
-        std::cout << "VoxelScene created successfully" << std::endl;
-        
-        // TODO: Add integration code here when needed
-        
-        std::cout << "\n=== VoxelScene Created Successfully ===" << std::endl;
-        
-        // Print statistics
-        scene.printStats();
-//        
         // Choose depth map source
         const bool USE_CUSTOM_DEPTHMAP = true;  // true: use custom, false: use loaded
 //        
@@ -483,7 +496,7 @@ int main(){
                                 rendered.depthmap[(size_t)i] = (fabsf(v) >= MINF * 0.5f) ? 0.0f : v;
                             }
 
-                            VisualizeCustomDepthMap(rendered);
+                            VisualizeCustomDepthMap(rendered, runOutputDir, "rendered");
                         }
 
                         std::cout << "  Rendering completed and depth shown." << std::endl;
@@ -779,7 +792,7 @@ int main(){
     } 
     
     catch (const std::exception& e) {
-        std::cerr << "Error creating VoxelScene: " << e.what() << std::endl;
+        std::cerr << "Error during VoxelScene processing: " << e.what() << std::endl;
         return -1;
     }
     

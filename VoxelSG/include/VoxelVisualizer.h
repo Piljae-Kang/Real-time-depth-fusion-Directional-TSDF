@@ -27,7 +27,7 @@ void VisualizeDepthMapWithOpenCV(const class ScanDataLoader& loader, const std::
 void VisualizeDepthMapAsPointCloud(const class ScanDataLoader& loader, const std::string& resolution, int frameIndex);
 
 // Custom depth map visualization
-void VisualizeCustomDepthMap(const class CustomDepthMapGenerator::GeneratedDepthMap& depthmap);
+void VisualizeCustomDepthMap(const class CustomDepthMapGenerator::GeneratedDepthMap& depthmap, std::string dirPath, std::string depthMapType);
 
 // Transform and visualize PCD in World coordinates
 void TransformAndVisualizePCDInWorld(const class ScanDataLoader& loader, int frameIdx = 0);

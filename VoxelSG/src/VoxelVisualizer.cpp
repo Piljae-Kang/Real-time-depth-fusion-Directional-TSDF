@@ -545,7 +545,7 @@ void VisualizeDepthMapAsPointCloud(const ScanDataLoader& loader, const std::stri
     std::cout << "Depth map to point cloud visualization completed!" << std::endl;
 }
 
-void VisualizeCustomDepthMap(const CustomDepthMapGenerator::GeneratedDepthMap& depthmap) {
+void VisualizeCustomDepthMap(const CustomDepthMapGenerator::GeneratedDepthMap& depthmap, std::string dirPath, std::string depthMapType) {
     std::cout << "Visualizing custom generated depth map..." << std::endl;
     std::cout << "Resolution: " << depthmap.width << "x" << depthmap.height << std::endl;
     
@@ -615,13 +615,41 @@ void VisualizeCustomDepthMap(const CustomDepthMapGenerator::GeneratedDepthMap& d
     cv::Mat depthColored;
     cv::applyColorMap(depthNormalized, depthColored, cv::COLORMAP_JET);
     
-    // Display images
-    cv::imshow("Custom Depth Map (Z)", depthColored);
-    cv::imshow("Custom Color Map", colorImage);
-    cv::imshow("Custom Normal Map", normalImage);
-    
-    std::cout << "Press any key to continue..." << std::endl;
-    cv::waitKey(0);
+    //// Display images
+    //cv::imshow("Custom Depth Map (Z)", depthColored);
+    //cv::imshow("Custom Color Map", colorImage);
+    //cv::imshow("Custom Normal Map", normalImage);
+    //
+    //std::cout << "Press any key to continue..." << std::endl;
+    //cv::waitKey(0);
+
+
+    //// Display images
+    //cv::imshow("Custom Depth Map (Z)", depthColored);
+    //cv::imshow("Custom Color Map", colorImage);
+    //cv::imshow("Custom Normal Map", normalImage);
+
+    bool write_png = true;
+
+    static int idx = 0;  // 함수 최초 호출 시 0으로 초기화, 이후 유지됨
+
+    if (write_png) {
+
+        std::string outputPath = dirPath + "/" + depthMapType +"_depthMap";
+        std::string outputPath_ = dirPath + "/" + depthMapType + "_normalMap";
+
+        if (!fs::exists(outputPath)) {
+            fs::create_directories(outputPath);
+            fs::create_directories(outputPath_);
+        }
+
+        cv::imwrite(outputPath + "/" + std::to_string(idx) + ".png", depthColored);
+        cv::imwrite(outputPath_ + "/" + std::to_string(idx) + ".png", normalImage);
+
+    }
+
+    idx++;
+
     
     //// Also create 3D point cloud visualization
     //std::vector<cv::Point3f> points;

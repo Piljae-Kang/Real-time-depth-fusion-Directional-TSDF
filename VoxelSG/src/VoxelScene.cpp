@@ -1,7 +1,18 @@
 #include "../include/VoxelScene.h"
 //#include "../include/DepthCameraData.h"
 #include <iostream>
+#include <fstream>
+#include <iomanip>
+#include <chrono>
+#include <ctime>
+#include <sstream>
 #include <cuda_runtime.h>
+#include <filesystem>
+#include <system_error>
+
+#define SAVE_VOXEL_TO_XYZ
+
+namespace fs = std::filesystem;
 
 // CUDA error checking macro
 #define CUDA_CHECK(call) \
@@ -31,6 +42,8 @@ VoxelScene::VoxelScene(const Params& params)
 
     std::cout << "VoxelScene: Initialization complete" << std::endl;
     printStats();
+
+    initializeOutputDirectory();
 }
 
 /**
@@ -74,6 +87,107 @@ void VoxelScene::allocate() {
 
     std::cout << "VoxelScene: Allocated " << (totalBytes / (1024.0 * 1024.0))
         << " MB on GPU" << std::endl;
+}
+
+void VoxelScene::initializeOutputDirectory() {
+    if (!m_outputDirectory.empty()) {
+        return;
+    }
+
+    std::error_code ec;
+    const fs::path baseDir("output");
+    fs::create_directories(baseDir, ec);
+    if (ec) {
+        std::cerr << "VoxelScene: Failed to create base output directory 'output' ("
+                  << ec.message() << "). Using current working directory instead." << std::endl;
+        m_outputDirectory = fs::current_path().string();
+        return;
+    }
+
+    auto now = std::chrono::system_clock::now();
+    std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+    std::tm localTm{};
+#ifdef _WIN32
+    localtime_s(&localTm, &nowTime);
+#else
+    localtime_r(&nowTime, &localTm);
+#endif
+
+    char buffer[32];
+    std::string folderName;
+    if (std::strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", &localTm) == 0) {
+        std::ostringstream fallback;
+        fallback << "run_" << static_cast<long long>(nowTime);
+        folderName = fallback.str();
+    } else {
+        folderName = buffer;
+    }
+
+    fs::path runDir = baseDir / folderName;
+    fs::create_directories(runDir, ec);
+    if (ec) {
+        std::cerr << "VoxelScene: Failed to create run output directory '" << runDir.string()
+                  << "' (" << ec.message() << "). Falling back to base directory." << std::endl;
+        m_outputDirectory = baseDir.string();
+    } else {
+        m_outputDirectory = runDir.string();
+    }
+
+    std::cout << "VoxelScene: Output directory set to '" << m_outputDirectory << "'" << std::endl;
+    writeGlobalParametersLog();
+}
+
+void VoxelScene::writeGlobalParametersLog() const {
+    if (m_outputDirectory.empty()) {
+        return;
+    }
+
+    const auto& gpc = GlobalParamsConfig::get();
+    const fs::path logPath = fs::path(m_outputDirectory) / "global_parameters.txt";
+
+    std::ofstream out(logPath);
+    if (!out.is_open()) {
+        std::cerr << "VoxelScene: Failed to write global parameters log at "
+                  << logPath.string() << std::endl;
+        return;
+    }
+
+    auto now = std::chrono::system_clock::now();
+    std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+    std::tm localTm{};
+#ifdef _WIN32
+    localtime_s(&localTm, &nowTime);
+#else
+    localtime_r(&localTm, &nowTime);
+#endif
+
+    out << "# VoxelScene Global Parameters" << std::endl;
+    out << "timestamp: " << std::put_time(&localTm, "%Y-%m-%d %H:%M:%S") << std::endl;
+    out << "output_directory: " << m_outputDirectory << std::endl;
+    out << "folder_name: " << fs::path(m_outputDirectory).filename().string() << std::endl;
+
+    out << "\n[Params]" << std::endl;
+    out << "SDFBlockSize: " << m_params.SDFBlockSize << std::endl;
+    out << "SDFBlockNum: " << m_params.SDFBlockNum << std::endl;
+    out << "TotalHashSize: " << m_params.totalHashSize << std::endl;
+    out << "HashSlotNum: " << m_params.hashSlotNum << std::endl;
+    out << "HashBucketSize: " << m_params.slotSize << std::endl;
+    out << "TotalVoxelCount: " << m_params.totalBlockSize << std::endl;
+    out << "VoxelSize: " << m_params.voxelSize << std::endl;
+    out << "TruncationScale: " << m_params.truncationScale << std::endl;
+    out << "TruncationDistance: " << m_params.truncation << std::endl;
+
+    out << "\n[GlobalParamsConfig]" << std::endl;
+    out << "g_hashNumSlots: " << gpc.g_hashNumSlots << std::endl;
+    out << "g_hashNumSDFBlocks: " << gpc.g_hashNumSDFBlocks << std::endl;
+    out << "g_hashNumBuckets: " << gpc.g_hashNumBuckets << std::endl;
+    out << "g_hashSlotSize: " << gpc.g_hashSlotSize << std::endl;
+    out << "g_SDFVoxelSize: " << gpc.g_SDFVoxelSize << std::endl;
+    out << "g_SDFTruncation: " << gpc.g_SDFTruncation << std::endl;
+    out << "g_SDFTruncationScale: " << gpc.g_SDFTruncationScale << std::endl;
+    out << "g_SDFMarchingCubeThreshFactor: " << gpc.g_SDFMarchingCubeThreshFactor << std::endl;
+
+    out.close();
 }
 
 /**
@@ -192,6 +306,13 @@ void VoxelScene::integrateDepthMap(const DepthCameraData& depthCameraData,
     integrateDepthMapCUDA(m_hashData, m_params, depthCameraData, depthCameraParams);
 }
 
+std::string VoxelScene::getOutputDirectory() const {
+    if (m_outputDirectory.empty()) {
+        const_cast<VoxelScene*>(this)->initializeOutputDirectory();
+    }
+    return m_outputDirectory;
+}
+
 /**
  * Get number of free slots in heap
  */
@@ -233,6 +354,10 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
     int width, int height, float truncationDistance, const cv::Mat& cameraTransform,
     float fx, float fy, float cx, float cy) {
     
+    if (m_outputDirectory.empty()) {
+        initializeOutputDirectory();
+    }
+
     std::cout << "VoxelScene: Starting 3-step depth map integration..." << std::endl;
     std::cout << "  Depth map size: " << width << "x" << height << std::endl;
     std::cout << "  Truncation distance: " << truncationDistance << std::endl;
@@ -335,42 +460,51 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
     int numActiveBlocks = 0;
     cudaMemcpy(&numActiveBlocks, m_hashData.d_hashCompactifiedCounter, sizeof(int), cudaMemcpyDeviceToHost);
     std::cout << "  Active blocks: " << numActiveBlocks << std::endl;
+
+
     
 #ifdef SAVE_VOXEL_TO_XYZ
     // Download compactified hash table from GPU
+
+    static int save_idx = 0;
+    const float blockSpan = static_cast<float>(m_params.SDFBlockSize) * m_params.voxelSize;
     HashSlot* h_compactified = new HashSlot[numActiveBlocks];
-    cudaError_t err = cudaMemcpy(h_compactified, m_hashData.d_CompactifiedHashTable, 
+    cudaError_t err_save = cudaMemcpy(h_compactified, m_hashData.d_CompactifiedHashTable, 
                                   numActiveBlocks * sizeof(HashSlot), 
                                   cudaMemcpyDeviceToHost);
 
-    if (err == cudaSuccess) {
+    if (err_save == cudaSuccess && save_idx == 80) {
         std::cout << "  Saving updated voxel positions to updated_voxel_positions.xyz..." << std::endl;
         
         // Download voxel data from GPU
-        VoxelData* h_SDFBlocks = new VoxelData[numActiveBlocks * 512];
+        const int voxelsPerBlock = m_params.SDFBlockSize * m_params.SDFBlockSize * m_params.SDFBlockSize;
+        VoxelData* h_SDFBlocks = new VoxelData[numActiveBlocks * voxelsPerBlock];
         cudaError_t err2 = cudaMemcpy(h_SDFBlocks, m_hashData.d_SDFBlocks,
-                                     numActiveBlocks * 512 * sizeof(VoxelData),
+                                     numActiveBlocks * voxelsPerBlock * sizeof(VoxelData),
                                      cudaMemcpyDeviceToHost);
         
         if (err2 == cudaSuccess) {
-            FILE* fp_xyz = fopen("updated_voxel_positions.xyz", "w");
-            FILE* fp_full = fopen("updated_voxel_full.txt", "w");
+            fs::path outputDir(m_outputDirectory);
+            fs::path xyzPath = outputDir / ("updated_voxel_positions_" + std::to_string(save_idx) + ".xyz");
+            fs::path fullPath = outputDir / "updated_voxel_full.txt";
+
+            FILE* fp_xyz = fopen(xyzPath.string().c_str(), "w");
+            FILE* fp_full = fopen(fullPath.string().c_str(), "w");
             
             if (fp_xyz && fp_full) {
                 fprintf(fp_full, "# Voxel data: x, y, z, sdf, weight, r, g, b\n");
                 
-                float voxelSize = GlobalParamsConfig::get().g_SDFVoxelSize;
                 int totalVoxels = 0;
                 int updatedVoxels = 0;
                 
                 for (int i = 0; i < numActiveBlocks; i++) {
                     int3 blockCoord = h_compactified[i].pos;
                     
-                    // Save block center/corner instead of all 512 voxels
+                    // Save block center/corner instead of all voxels in the block
                     float3 blockCenter = make_float3(
-                        blockCoord.x * 8 * voxelSize,
-                        blockCoord.y * 8 * voxelSize,
-                        blockCoord.z * 8 * voxelSize
+                        blockCoord.x * blockSpan,
+                        blockCoord.y * blockSpan,
+                        blockCoord.z * blockSpan
                     );
                     
                     // Standard .xyz format: block center
@@ -397,6 +531,8 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
         delete[] h_SDFBlocks;
     }
     delete[] h_compactified;
+
+    save_idx++;
 #endif
     
     // Clean up GPU memory
