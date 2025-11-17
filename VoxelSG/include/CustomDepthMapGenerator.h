@@ -48,17 +48,18 @@ public:
     struct GeneratedDepthMapFrames {
         std::vector<GeneratedDepthMap> src_0;   // Depth maps for src_0 (0-degree view)
         std::vector<GeneratedDepthMap> src_45;   // Depth maps for src_45 (45-degree view)
+        std::vector<GeneratedDepthMap> total;    // Depth maps for total (src_0 + src_45 combined)
         
         GeneratedDepthMapFrames() {}
         
         // Get total number of frames
         size_t getFrameCount() const {
-            return std::max(src_0.size(), src_45.size());
+            return std::max({src_0.size(), src_45.size(), total.size()});
         }
         
         // Check if empty
         bool empty() const {
-            return src_0.empty() && src_45.empty();
+            return src_0.empty() && src_45.empty() && total.empty();
         }
     };
 
@@ -87,6 +88,13 @@ public:
         const std::vector<cv::Vec3b>& colors = std::vector<cv::Vec3b>()
     );
     
+    // Generate depth map from combined point clouds (src_0 + src_45)
+    // Combines two point cloud formats and generates a single depth map
+    GeneratedDepthMap generateFromCombinedPointClouds(
+        const PointCloudFormat& src0,
+        const PointCloudFormat& src45
+    );
+    
     // Generate depth map from existing depth map (reprojection)
     GeneratedDepthMap generateFromExistingDepthMap(
         const std::vector<cv::Vec3f>& sourceDepthmap,
@@ -109,6 +117,12 @@ public:
                      const std::string& prefix = "custom",
                      bool saveBinary = true,
                      bool savePng = false) const;
+    
+    // Save point cloud from depth map as PLY (world coordinates)
+    // Transforms camera coordinates to world coordinates using cameraToWorld transform
+    bool savePointCloudPLY(const GeneratedDepthMap& depthmap,
+                            const cv::Mat& cameraToWorld,
+                            const std::string& filePath) const;
     
     // Get current camera parameters
     const CameraParams& getCameraParams() const { return cameraParams_; }

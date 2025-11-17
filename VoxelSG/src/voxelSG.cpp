@@ -203,7 +203,7 @@ int main(){
             allGeneratedDepthMaps.src_45.push_back(customDepthMap45);
 
             // Visualize 45-degree depth map
-            //VisualizeCustomDepthMap(customDepthMap45, runOutputDir, "custom45");
+            VisualizeCustomDepthMap(customDepthMap45, runOutputDir, "custom45");
 
             // Save 45-degree depth map
             //std::string frameSuffix = "_frame" + std::to_string(i);
@@ -213,6 +213,30 @@ int main(){
             //    "custom_45_degree" + frameSuffix,
             //    false,
             //    true);
+        }
+
+        // Generate depth map from total (src_0 + src_45 combined) point cloud
+        {
+            std::cout << "Generating custom depth map from total point cloud (src_0 + src_45, frame " << i << ")..." << std::endl;
+            
+            auto customDepthMapTotal = customGenerator.generateFromCombinedPointClouds(
+                pointCloudParams.src_0,
+                pointCloudParams.src_45
+            );
+            
+            if (!customDepthMapTotal.depthmap.empty()) {
+                // Store in vector for later use
+                allGeneratedDepthMaps.total.push_back(customDepthMapTotal);
+
+                // Visualize total depth map
+                VisualizeCustomDepthMap(customDepthMapTotal, runOutputDir, "custom_total");
+
+                // Save total point cloud as PLY (world coordinates)
+                if (!matrixParams.cameraToWorld0.empty() && i < static_cast<int>(matrixParams.cameraToWorld0.size())) {
+                    std::string plyPath = runOutputDir + "/totoal_pcd" + "/total_pointcloud_frame_" + std::to_string(i) + ".ply";
+                    customGenerator.savePointCloudPLY(customDepthMapTotal, matrixParams.cameraToWorld0[i], plyPath);
+                }
+            }
         }
 
         // Optional: Process additional frames if available
@@ -277,6 +301,7 @@ int main(){
     std::cout << "\n=== Generated Depth Maps Summary ===" << std::endl;
     std::cout << "src_0 depth maps: " << allGeneratedDepthMaps.src_0.size() << " frames" << std::endl;
     std::cout << "src_45 depth maps: " << allGeneratedDepthMaps.src_45.size() << " frames" << std::endl;
+    std::cout << "total depth maps: " << allGeneratedDepthMaps.total.size() << " frames" << std::endl;
     
     // Now you can access generated depth maps like:
     // allGeneratedDepthMaps.src_0[frameIndex] for src_0 depth map of specific frame
@@ -310,11 +335,23 @@ int main(){
                     return -1;
                 }
 
-                // Choose which depth map to use
+                // Choose which depth map to use (use total instead of src_0)
                 CustomDepthMapGenerator::GeneratedDepthMap customDepthMap;
-                
 
-                customDepthMap = allGeneratedDepthMaps.src_0[i];
+                customDepthMap = allGeneratedDepthMaps.total[i];
+                //customDepthMap = allGeneratedDepthMaps.src_0[i];
+                
+                //// Use total depth map (src_0 + src_45 combined) if available, otherwise fall back to src_0
+                //if (i < static_cast<int>(allGeneratedDepthMaps.total.size()) && !allGeneratedDepthMaps.total[i].depthmap.empty()) {
+                //    customDepthMap = allGeneratedDepthMaps.total[i];
+                //    std::cout << "Using total depth map (src_0 + src_45 combined) for frame " << i << std::endl;
+                //} else if (i < static_cast<int>(allGeneratedDepthMaps.src_0.size()) && !allGeneratedDepthMaps.src_0[i].depthmap.empty()) {
+                //    customDepthMap = allGeneratedDepthMaps.src_0[i];
+                //    std::cout << "Using src_0 depth map (fallback) for frame " << i << std::endl;
+                //} else {
+                //    std::cerr << "No depth map available for frame " << i << std::endl;
+                //    continue;
+                //}
 
                 depthWidth = customDepthMap.width;
                 depthHeight = customDepthMap.height;
@@ -497,6 +534,11 @@ int main(){
                             }
 
                             VisualizeCustomDepthMap(rendered, runOutputDir, "rendered");
+                        }
+
+                        std::string plyOutputPath = runOutputDir + "/raycast_outputs/frame_" + std::to_string(i) + ".ply";
+                        if (!renderer.savePointCloudPLY(plyOutputPath)) {
+                            std::cerr << "Failed to save raycast point cloud: " << plyOutputPath << std::endl;
                         }
 
                         std::cout << "  Rendering completed and depth shown." << std::endl;

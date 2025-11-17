@@ -609,3 +609,119 @@ CustomDepthMapGenerator::GeneratedDepthMap CustomDepthMapGenerator::generateFrom
     // For now, fall back to CPU implementation
     return generateFromPointCloud(points, normals, colors);
 }
+
+CustomDepthMapGenerator::GeneratedDepthMap CustomDepthMapGenerator::generateFromCombinedPointClouds(
+    const PointCloudFormat& src0,
+    const PointCloudFormat& src45) {
+    
+    std::vector<cv::Point3f> totalPoints;
+    std::vector<cv::Point3f> totalNormals;
+    std::vector<cv::Vec3b> totalColors;
+
+    // Combine src_0 and src_45 point clouds
+    if (!src0.points.empty()) {
+        totalPoints.insert(totalPoints.end(), src0.points.begin(), src0.points.end());
+        totalNormals.insert(totalNormals.end(), src0.normals.begin(), src0.normals.end());
+        totalColors.insert(totalColors.end(), src0.colors.begin(), src0.colors.end());
+    }
+    if (!src45.points.empty()) {
+        totalPoints.insert(totalPoints.end(), src45.points.begin(), src45.points.end());
+        totalNormals.insert(totalNormals.end(), src45.normals.begin(), src45.normals.end());
+        totalColors.insert(totalColors.end(), src45.colors.begin(), src45.colors.end());
+    }
+
+    if (totalPoints.empty()) {
+        std::cerr << "CustomDepthMapGenerator: Both point clouds are empty!" << std::endl;
+        return GeneratedDepthMap();
+    }
+
+    std::cout << "Combining point clouds: src_0=" << src0.points.size() 
+              << ", src_45=" << src45.points.size() 
+              << ", total=" << totalPoints.size() << std::endl;
+
+    return generateFromPointCloud(totalPoints, totalNormals, totalColors);
+}
+
+bool CustomDepthMapGenerator::savePointCloudPLY(
+    const GeneratedDepthMap& depthmap,
+    const cv::Mat& cameraToWorld,
+    const std::string& filePath) const {
+    
+    if (depthmap.pointmap.empty()) {
+        std::cerr << "CustomDepthMapGenerator: Point map is empty!" << std::endl;
+        return false;
+    }
+    
+    if (cameraToWorld.empty() || cameraToWorld.rows != 4 || cameraToWorld.cols != 4) {
+        std::cerr << "CustomDepthMapGenerator: Invalid cameraToWorld transform (must be 4x4)!" << std::endl;
+        return false;
+    }
+    
+    // Count valid points
+    size_t validCount = 0;
+    for (size_t idx = 0; idx < depthmap.pointmap.size(); ++idx) {
+        const auto& pt = depthmap.pointmap[idx];
+        if (pt[0] != 0.0f || pt[1] != 0.0f || pt[2] != 0.0f) {
+            validCount++;
+        }
+    }
+    
+    if (validCount == 0) {
+        std::cerr << "CustomDepthMapGenerator: No valid points to export." << std::endl;
+        return false;
+    }
+    
+    // Create output directory if needed
+    std::filesystem::path outPath(filePath);
+    if (outPath.has_parent_path()) {
+        std::filesystem::create_directories(outPath.parent_path());
+    }
+    
+    std::ofstream ofs(outPath);
+    if (!ofs) {
+        std::cerr << "CustomDepthMapGenerator: Failed to open " << filePath << " for writing." << std::endl;
+        return false;
+    }
+    
+    // Write PLY header
+    ofs << "ply\nformat ascii 1.0\n";
+    ofs << "comment Generated from total point cloud (src_0 + src_45)\n";
+    ofs << "element vertex " << validCount << "\n";
+    ofs << "property float x\nproperty float y\nproperty float z\n";
+    ofs << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+    ofs << "end_header\n";
+    
+    // Convert transform to float
+    cv::Mat poseFloat;
+    cameraToWorld.convertTo(poseFloat, CV_32F);
+    auto posePtr = poseFloat.ptr<float>(0);
+    
+    // Write points
+    for (size_t idx = 0; idx < depthmap.pointmap.size(); ++idx) {
+        const auto& pt_camera = depthmap.pointmap[idx];
+        if (pt_camera[0] == 0.0f && pt_camera[1] == 0.0f && pt_camera[2] == 0.0f) {
+            continue; // Skip invalid points
+        }
+        
+        // Transform from camera to world coordinates
+        float wx = posePtr[0] * pt_camera[0] + posePtr[1] * pt_camera[1] + posePtr[2] * pt_camera[2] + posePtr[3];
+        float wy = posePtr[4] * pt_camera[0] + posePtr[5] * pt_camera[1] + posePtr[6] * pt_camera[2] + posePtr[7];
+        float wz = posePtr[8] * pt_camera[0] + posePtr[9] * pt_camera[1] + posePtr[10] * pt_camera[2] + posePtr[11];
+        
+        // Get color
+        int r = 255, g = 255, b = 255;
+        if (idx < depthmap.colormap.size()) {
+            const auto& col = depthmap.colormap[idx];
+            r = col[2]; // OpenCV uses BGR
+            g = col[1];
+            b = col[0];
+        }
+        
+        ofs << wx << " " << wy << " " << wz << " "
+            << r << " " << g << " " << b << "\n";
+    }
+    
+    ofs.close();
+    std::cout << "CustomDepthMapGenerator: Saved point cloud to " << filePath << " (" << validCount << " points)" << std::endl;
+    return true;
+}

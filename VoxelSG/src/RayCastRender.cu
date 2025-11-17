@@ -295,14 +295,14 @@ __device__ void traverseCoarseGridSimpleSampleAll(
         float dist;
         uchar3 color;
 
-        //printf("%f %f %f\n", currentPosWorld.x, currentPosWorld.y, currentPosWorld.z);
+        printf("%f %f %f\n", currentPosWorld.x, currentPosWorld.y, currentPosWorld.z);
         
         if (trilinearInterpolationSimpleFastFast(d_hashTable, numBuckets, bucketSize, totalHashSize, d_SDFBlocks,
                                                 currentPosWorld, dist, color, voxelSize)) {
             if (lastWeight > 0 && lastSdf < 0.0f && dist > 0.0f) {
 
-                //printf("-----------------------------\n");
-                //printf("-----------change---------\n");
+                printf("-----------------------------\n");
+                printf("-----------change---------\n");
 
 
 
@@ -318,11 +318,11 @@ __device__ void traverseCoarseGridSimpleSampleAll(
                     worldCamPos.z + alpha * worldDir.z
                 );
 
-                if (b == false) {
+                //if (b == false) {
 
-                    printf("pixel id : %d\n", dTid.y * width + dTid.x);
+                //    printf("pixel id : %d\n", dTid.y * width + dTid.x);
 
-                }
+                //}
                 //else {
                 //    printf("b : %d\n", b);
                 //    printf("dist gap : %f\n", fabsf(lastSdf - dist));
@@ -337,7 +337,14 @@ __device__ void traverseCoarseGridSimpleSampleAll(
                 // For now, just store the result
 
 
-                float th = 0.05f;
+                //float th = 0.05f;
+                float th = voxelSize * 3;
+                
+                //if(b)
+                //{
+                //    printf("[RayCast] voxelSize=%.4f, threshold=%.4f, dist : %f\n", voxelSize, th, dist);
+                //}
+                
                 
                 if (b && fabsf(lastSdf - dist) < th) {
                     if (fabsf(dist) < th) {

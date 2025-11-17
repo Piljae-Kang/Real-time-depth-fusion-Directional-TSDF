@@ -3,6 +3,7 @@
 #include "CUDAHashData.h"
 #include "CUDAHashRef.h"
 #include <cuda_runtime.h>
+#include <string>
 
 // Forward declaration
 class VoxelScene;
@@ -26,6 +27,7 @@ private:
     float4* m_d_outputDepth;
     float4* m_d_outputColor;
     float4* m_d_outputNormal;
+    float4* m_d_outputPosition;
     
 public:
     /**
@@ -71,6 +73,11 @@ public:
 
     // Download only depth (1-channel float) for direct imshow
     void downloadDepthFloat(float* h_outputDepthFloat);
+
+    /**
+     * Save current raycast point cloud (world positions + colors) as PLY
+     */
+    bool savePointCloudPLY(const std::string& filePath);
     
     /**
      * Get GPU buffer pointers (for direct GPU access)
@@ -78,6 +85,7 @@ public:
     float4* getOutputDepth() const { return m_d_outputDepth; }
     float4* getOutputColor() const { return m_d_outputColor; }
     float4* getOutputNormal() const { return m_d_outputNormal; }
+    float4* getOutputPositions() const { return m_d_outputPosition; }
     
     int getWidth() const { return m_width; }
     int getHeight() const { return m_height; }
