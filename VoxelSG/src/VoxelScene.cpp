@@ -467,13 +467,15 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
     // Download compactified hash table from GPU
 
     static int save_idx = 0;
+    //int save_idx = 0;
+
     const float blockSpan = static_cast<float>(m_params.SDFBlockSize) * m_params.voxelSize;
     HashSlot* h_compactified = new HashSlot[numActiveBlocks];
     cudaError_t err_save = cudaMemcpy(h_compactified, m_hashData.d_CompactifiedHashTable, 
                                   numActiveBlocks * sizeof(HashSlot), 
                                   cudaMemcpyDeviceToHost);
 
-    if (err_save == cudaSuccess && save_idx == 80) {
+    if (err_save == cudaSuccess && save_idx == 90) {
         std::cout << "  Saving updated voxel positions to updated_voxel_positions.xyz..." << std::endl;
         
         // Download voxel data from GPU

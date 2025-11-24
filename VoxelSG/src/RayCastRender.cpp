@@ -12,6 +12,10 @@
 #include <cmath>
 #include <algorithm>
 
+
+#define RAY_DEBUG
+
+
 namespace fs = std::filesystem;
 
 // Forward declaration of CUDA types
@@ -27,6 +31,18 @@ extern "C" void rayCastRenderCUDA(CUDAHashRef& hashData, int width, int height,
                                    float minDepth, float maxDepth, float voxelSize,
                                    int numBuckets, int bucketSize, int totalHashSize);
 
+extern "C" void extractSurfacePointsCUDA(
+    const CUDAHashRef& hashData,
+    const Params& params,
+    float minSDF,
+    float maxSDF,
+    float4* d_outputPositions,
+    float4* d_outputColors,
+    float4* d_outputNormals,
+    int maxPoints,
+    int* d_pointCount
+);
+
 /**
  * Constructor
  */
@@ -38,6 +54,12 @@ RayCastRender::RayCastRender()
     , m_d_outputColor(nullptr)
     , m_d_outputNormal(nullptr)
     , m_d_outputPosition(nullptr)
+    , m_d_extractedPositions(nullptr)
+    , m_d_extractedColors(nullptr)
+    , m_d_extractedNormals(nullptr)
+    , m_d_extractedCount(nullptr)
+    , m_maxExtractedPoints(10000000)  // 10M points max
+    , m_numExtractedPoints(0)
 {
 }
 
@@ -51,6 +73,12 @@ RayCastRender::~RayCastRender() {
         cudaFree(m_d_outputNormal);
         cudaFree(m_d_outputPosition);
     }
+    
+    // Free extracted points buffers
+    if (m_d_extractedPositions) cudaFree(m_d_extractedPositions);
+    if (m_d_extractedColors) cudaFree(m_d_extractedColors);
+    if (m_d_extractedNormals) cudaFree(m_d_extractedNormals);
+    if (m_d_extractedCount) cudaFree(m_d_extractedCount);
 }
 
 /**
@@ -134,6 +162,23 @@ void RayCastRender::render(const VoxelScene* voxelScene,
         params.hashSlotNum, params.slotSize, params.totalHashSize
     );
     std::cout << "RayCastRender: Ray cast rendering completed!" << std::endl;
+
+
+#ifdef RAY_DEBUG
+
+
+
+
+
+
+
+
+
+
+#endif
+
+
+
 }
 
 /**
@@ -252,6 +297,147 @@ bool RayCastRender::savePointCloudPLY(const std::string& filePath) {
     }
 
     std::cout << "RayCastRender: Saved point cloud to " << outPath << " (" << validCount << " points)" << std::endl;
+    return true;
+}
+
+/**
+ * Extract surface points from voxel grid
+ */
+int RayCastRender::extractSurfacePoints(const VoxelScene* voxelScene,
+                                        float minSDF,
+                                        float maxSDF) {
+    if (!voxelScene) {
+        std::cerr << "RayCastRender::extractSurfacePoints: Invalid voxelScene!" << std::endl;
+        return 0;
+    }
+    
+    const CUDAHashRef& hashData = voxelScene->getHashData();
+    const Params& params = voxelScene->getParams();
+    
+    // Allocate buffers if not already allocated
+    if (!m_d_extractedPositions) {
+        cudaError_t err1 = cudaMalloc(&m_d_extractedPositions, m_maxExtractedPoints * sizeof(float4));
+        cudaError_t err2 = cudaMalloc(&m_d_extractedColors, m_maxExtractedPoints * sizeof(float4));
+        cudaError_t err3 = cudaMalloc(&m_d_extractedNormals, m_maxExtractedPoints * sizeof(float4));
+        cudaError_t err4 = cudaMalloc(&m_d_extractedCount, sizeof(int));
+        
+        if (err1 != cudaSuccess || err2 != cudaSuccess || err3 != cudaSuccess || err4 != cudaSuccess) {
+            std::cerr << "RayCastRender::extractSurfacePoints: Failed to allocate GPU memory!" << std::endl;
+            if (m_d_extractedPositions) cudaFree(m_d_extractedPositions);
+            if (m_d_extractedColors) cudaFree(m_d_extractedColors);
+            if (m_d_extractedNormals) cudaFree(m_d_extractedNormals);
+            if (m_d_extractedCount) cudaFree(m_d_extractedCount);
+            m_d_extractedPositions = nullptr;
+            m_d_extractedColors = nullptr;
+            m_d_extractedNormals = nullptr;
+            m_d_extractedCount = nullptr;
+            return 0;
+        }
+    }
+    
+    // Reset point count
+    cudaMemset(m_d_extractedCount, 0, sizeof(int));
+    
+    // Call CUDA kernel
+    extractSurfacePointsCUDA(
+        hashData,
+        params,
+        minSDF,
+        maxSDF,
+        m_d_extractedPositions,
+        m_d_extractedColors,
+        m_d_extractedNormals,
+        m_maxExtractedPoints,
+        m_d_extractedCount
+    );
+    
+    // Read back point count
+    cudaMemcpy(&m_numExtractedPoints, m_d_extractedCount, sizeof(int), cudaMemcpyDeviceToHost);
+    
+    std::cout << "RayCastRender::extractSurfacePoints: Extracted " << m_numExtractedPoints 
+              << " surface points (SDF range: [" << minSDF << ", " << maxSDF << "])" << std::endl;
+    
+    return m_numExtractedPoints;
+}
+
+/**
+ * Save extracted surface points as PLY
+ */
+bool RayCastRender::saveExtractedSurfacePointsPLY(const std::string& filePath) {
+    if (!m_d_extractedPositions || m_numExtractedPoints == 0) {
+        std::cerr << "RayCastRender::saveExtractedSurfacePointsPLY: No points to save!" << std::endl;
+        return false;
+    }
+    
+    // Download data from GPU
+    std::vector<float4> h_positions(m_numExtractedPoints);
+    std::vector<float4> h_colors(m_numExtractedPoints);
+    std::vector<float4> h_normals(m_numExtractedPoints);
+    
+    cudaMemcpy(h_positions.data(), m_d_extractedPositions, 
+               m_numExtractedPoints * sizeof(float4), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_colors.data(), m_d_extractedColors, 
+               m_numExtractedPoints * sizeof(float4), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_normals.data(), m_d_extractedNormals, 
+               m_numExtractedPoints * sizeof(float4), cudaMemcpyDeviceToHost);
+    
+    // Create output directory if needed
+    fs::path outPath(filePath);
+    fs::create_directories(outPath.parent_path());
+    
+    // Write PLY file
+    std::ofstream ofs(outPath);
+    if (!ofs.is_open()) {
+        std::cerr << "RayCastRender::saveExtractedSurfacePointsPLY: Failed to open file: " << filePath << std::endl;
+        return false;
+    }
+    
+    // Filter valid points
+    size_t validCount = 0;
+    for (size_t i = 0; i < m_numExtractedPoints; i++) {
+        const auto& pos = h_positions[i];
+        if (std::isfinite(pos.x) && std::isfinite(pos.y) && std::isfinite(pos.z)) {
+            validCount++;
+        }
+    }
+    
+    // Write PLY header
+    ofs << "ply\n";
+    ofs << "format ascii 1.0\n";
+    ofs << "comment Generated by RayCastRender::extractSurfacePoints\n";
+    ofs << "element vertex " << validCount << "\n";
+    ofs << "property float x\nproperty float y\nproperty float z\n";
+    ofs << "property float nx\nproperty float ny\nproperty float nz\n";
+    ofs << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+    ofs << "end_header\n";
+    
+    // Write points
+    auto toColorChannel = [](float v) -> int {
+        if (!std::isfinite(v)) return 255;
+        v = std::min(std::max(v, 0.0f), 1.0f);
+        return static_cast<int>(v * 255.0f + 0.5f);
+    };
+    
+    for (size_t i = 0; i < m_numExtractedPoints; i++) {
+        const auto& pos = h_positions[i];
+        if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z)) {
+            continue;
+        }
+        
+        const auto& col = h_colors[i];
+        const auto& norm = h_normals[i];
+        
+        int r = toColorChannel(col.x);
+        int g = toColorChannel(col.y);
+        int b = toColorChannel(col.z);
+        
+        ofs << pos.x << " " << pos.y << " " << pos.z << " "
+            << norm.x << " " << norm.y << " " << norm.z << " "
+            << r << " " << g << " " << b << "\n";
+    }
+    
+    std::cout << "RayCastRender::saveExtractedSurfacePointsPLY: Saved " << validCount 
+              << " points to " << filePath << std::endl;
     return true;
 }
 

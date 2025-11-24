@@ -5,7 +5,10 @@ ScanDataLoader2::ScanDataLoader2(std::string filepath) {
 
 	dataPath_ = filepath;
 	startIdx_ = 0;
+	
+	//frameN_ = 1;
 	frameN_ = 100;
+	
 	//frameN_ = 50; // Must be deleted later
 
 	// Initialize default/empty params for compatibility

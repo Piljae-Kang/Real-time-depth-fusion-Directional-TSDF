@@ -29,6 +29,14 @@ private:
     float4* m_d_outputNormal;
     float4* m_d_outputPosition;
     
+    // Extracted surface points buffers
+    float4* m_d_extractedPositions;  // xyz + padding
+    float4* m_d_extractedColors;     // rgb + padding
+    float4* m_d_extractedNormals;    // normal xyz + padding
+    int* m_d_extractedCount;         // Atomic counter for extracted points
+    int m_maxExtractedPoints;        // Maximum number of points to extract
+    int m_numExtractedPoints;         // Actual number of extracted points
+    
 public:
     /**
      * Constructor
@@ -78,6 +86,25 @@ public:
      * Save current raycast point cloud (world positions + colors) as PLY
      */
     bool savePointCloudPLY(const std::string& filePath);
+    
+    /**
+     * Extract surface points from voxel grid (voxelwise extraction)
+     * Similar to Marching Cubes point extraction but simpler
+     * @param voxelScene pointer to VoxelScene containing SDF data
+     * @param minSDF minimum SDF threshold for surface extraction
+     * @param maxSDF maximum SDF threshold for surface extraction
+     * @return number of extracted points
+     */
+    int extractSurfacePoints(const VoxelScene* voxelScene,
+                             float minSDF = -0.01f,
+                             float maxSDF = 0.01f);
+    
+    /**
+     * Save extracted surface points as PLY
+     * @param filePath output PLY file path
+     * @return success status
+     */
+    bool saveExtractedSurfacePointsPLY(const std::string& filePath);
     
     /**
      * Get GPU buffer pointers (for direct GPU access)

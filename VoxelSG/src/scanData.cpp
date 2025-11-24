@@ -6,7 +6,7 @@ namespace fs = std::filesystem;
 
 ScanDataLoader::ScanDataLoader(const std::string& path) : rootPath(path) {
     
-    frame_idx = 2;
+    frame_idx = 200;
     //width = 400;
     //height = 480;
 
@@ -232,178 +232,221 @@ void ScanDataLoader::loadMatrixParams() {
         return;
     }
     
+    int maxFrames = std::min(availableMatrixFiles, frame_idx);
+    
+    if (maxFrames <= 0) {
+        std::cout << "Warning: No matrix files available from frame_idx " << frame_idx << std::endl;
+        return;
+    }
+    
     std::cout << "Found " << availableMatrixFiles << " matrix files" << std::endl;
-    std::cout << "Loading matrix file for frame_idx: " << frame_idx << std::endl;
+    std::cout << "Loading matrix files from frame_idx " << frame_idx << " (max " << maxFrames << " frames)..." << std::endl;
     
-    // Load only the matrix file for the current frame_idx
-    char filename[32];
-    sprintf_s(filename, sizeof(filename), "%06d.txt", frame_idx);
-    std::string filePath = matrixParamsPath + "/" + filename;
+    // Clear existing matrices
+    matrixParams.transform_0.clear();
+    matrixParams.transform_45.clear();
+    matrixParams.localToCamera.clear();
+    matrixParams.cameraToWorld0.clear();
+    matrixParams.cameraToWorld45.clear();
     
-    std::cout << "Attempting to load matrix file: " << filePath << std::endl;
+    matrixParams.transform_0.reserve(maxFrames);
+    matrixParams.transform_45.reserve(maxFrames);
+    matrixParams.localToCamera.reserve(maxFrames);
+    matrixParams.cameraToWorld0.reserve(maxFrames);
+    matrixParams.cameraToWorld45.reserve(maxFrames);
     
-    if (!fs::exists(filePath)) {
-        std::cout << "Warning: Matrix file not found: " << filePath << std::endl;
-        return;
-    }
-    
-    std::cout << "File exists, opening..." << std::endl;
-    
-    std::ifstream file(filePath);
-    if (!file.is_open()) {
-        std::cout << "Warning: Cannot open matrix file: " << filePath << std::endl;
-        return;
-    }
-    
-    std::string line;
-    cv::Mat transform_0 = cv::Mat::eye(4, 4, CV_32F);
-    cv::Mat transform_45 = cv::Mat::eye(4, 4, CV_32F);
-    cv::Mat localToCamera = cv::Mat::eye(4, 4, CV_32F);
-    
-    bool reading_transform_0 = false;
-    bool reading_transform_45 = false;
-    bool reading_localToCamera = false;
-    int row = 0;
-    
-    int lineNum = 0;
-    while (std::getline(file, line)) {
-        lineNum++;
+    // Load multiple frames starting from frame_idx
+    for (int currentFrameIdx = 0; currentFrameIdx < maxFrames; currentFrameIdx++) {
         
-        // Find Transform_0, Transform_45, or CameraRT section
-        if (line.find("Transform_0") != std::string::npos) {
-            std::cout << "Found Transform_0 at line " << lineNum << ": " << line << std::endl;
-            reading_transform_0 = true;
-            reading_transform_45 = false;
-            reading_localToCamera = false;
-            row = 0;
-            continue;
-        } else if (line.find("Transform_45") != std::string::npos) {
-            std::cout << "Found Transform_45 at line " << lineNum << ": " << line << std::endl;
-            reading_transform_0 = false;
-            reading_transform_45 = true;
-            reading_localToCamera = false;
-            row = 0;
-            continue;
-        } else if (line.find("CameraRT") != std::string::npos) {
-            std::cout << "Found CameraRT at line " << lineNum << ": " << line << std::endl;
-            reading_transform_0 = false;
-            reading_transform_45 = false;
-            reading_localToCamera = true;
-            row = 0;
+        char filename[32];
+        sprintf_s(filename, sizeof(filename), "%06d.txt", currentFrameIdx);
+        std::string filePath = matrixParamsPath + "/" + filename;
+        
+        if (!fs::exists(filePath)) {
+            std::cout << "Warning: Matrix file not found: " << filePath << ", skipping..." << std::endl;
             continue;
         }
         
-        // Parse matrix data
-        if (reading_transform_0 || reading_transform_45 || reading_localToCamera) {
-            // Skip if line is empty or doesn't contain numbers
-            if (line.empty() || line.find_first_of("0123456789.-") == std::string::npos) {
+        std::ifstream file(filePath);
+        if (!file.is_open()) {
+            std::cout << "Warning: Cannot open matrix file: " << filePath << ", skipping..." << std::endl;
+            continue;
+        }
+        
+        std::string line;
+        cv::Mat transform_0 = cv::Mat::eye(4, 4, CV_32F);
+        cv::Mat transform_45 = cv::Mat::eye(4, 4, CV_32F);
+        cv::Mat localToCamera = cv::Mat::eye(4, 4, CV_32F);
+        
+        bool reading_transform_0 = false;
+        bool reading_transform_45 = false;
+        bool reading_localToCamera = false;
+        int row = 0;
+        
+        int lineNum = 0;
+        while (std::getline(file, line)) {
+            lineNum++;
+            
+            // Find Transform_0, Transform_45, or CameraRT section
+            if (line.find("Transform_0") != std::string::npos) {
+                reading_transform_0 = true;
+                reading_transform_45 = false;
+                reading_localToCamera = false;
+                row = 0;
+                continue;
+            } else if (line.find("Transform_45") != std::string::npos) {
+                reading_transform_0 = false;
+                reading_transform_45 = true;
+                reading_localToCamera = false;
+                row = 0;
+                continue;
+            } else if (line.find("CameraRT") != std::string::npos) {
+                reading_transform_0 = false;
+                reading_transform_45 = false;
+                reading_localToCamera = true;
+                row = 0;
                 continue;
             }
             
-            // Check if this line contains matrix data (should have 4 float numbers)
-            // Try to parse the line
-            std::string dataPart = line;
-            size_t colonPos = line.find(':');
-            if (colonPos != std::string::npos) {
-                dataPart = line.substr(colonPos + 1);
-            }
-            
-            std::istringstream dataStream(dataPart);
-            std::string token;
-            int col = 0;
-            bool hasValidData = false;
-            
-            while (dataStream >> token && col < 4) {
-                try {
-                    float value = std::stof(token);
-                    if (reading_transform_0) {
-                        transform_0.at<float>(row, col) = value;
-                    } else if (reading_transform_45) {
-                        transform_45.at<float>(row, col) = value;
-                    } else if (reading_localToCamera) {
-                        localToCamera.at<float>(row, col) = value;
+            // Parse matrix data
+            if (reading_transform_0 || reading_transform_45 || reading_localToCamera) {
+                // Skip if line is empty or doesn't contain numbers
+                if (line.empty() || line.find_first_of("0123456789.-") == std::string::npos) {
+                    continue;
+                }
+                
+                // Check if this line contains matrix data (should have 4 float numbers)
+                // Try to parse the line
+                std::string dataPart = line;
+                size_t colonPos = line.find(':');
+                if (colonPos != std::string::npos) {
+                    dataPart = line.substr(colonPos + 1);
+                }
+                
+                std::istringstream dataStream(dataPart);
+                std::string token;
+                int col = 0;
+                bool hasValidData = false;
+                
+                while (dataStream >> token && col < 4) {
+                    try {
+                        float value = std::stof(token);
+                        if (reading_transform_0) {
+                            transform_0.at<float>(row, col) = value;
+                        } else if (reading_transform_45) {
+                            transform_45.at<float>(row, col) = value;
+                        } else if (reading_localToCamera) {
+                            localToCamera.at<float>(row, col) = value;
+                        }
+                        col++;
+                        hasValidData = true;
+                    } catch (const std::exception& e) {
+                        // If parsing fails, this line is not matrix data, skip it
+                        break;
                     }
-                    col++;
-                    hasValidData = true;
-                } catch (const std::exception& e) {
-                    // If parsing fails, this line is not matrix data, skip it
+                }
+                
+                // Only increment row if we successfully parsed 4 values
+                if (hasValidData && col == 4) {
+                    row++;
+                }
+            }
+        }
+        
+        file.close();
+        
+        // Validate matrices before storing
+        if (transform_0.empty() || transform_0.rows != 4 || transform_0.cols != 4 ||
+            transform_45.empty() || transform_45.rows != 4 || transform_45.cols != 4 ||
+            localToCamera.empty() || localToCamera.rows != 4 || localToCamera.cols != 4) {
+            std::cout << "Warning: Invalid matrix data for frame " << currentFrameIdx << ", skipping..." << std::endl;
+            continue;
+        }
+        
+        // Store matrices in vector (use clone() to ensure deep copy)
+        // Clone immediately to avoid any reference issues
+        cv::Mat transform_0_clone = transform_0.clone();
+        cv::Mat transform_45_clone = transform_45.clone();
+        cv::Mat localToCamera_clone = localToCamera.clone();
+        
+        // Validate cloned matrices
+        if (transform_0_clone.empty() || transform_45_clone.empty() || localToCamera_clone.empty()) {
+            std::cout << "Warning: Failed to clone matrices for frame " << currentFrameIdx << ", skipping..." << std::endl;
+            continue;
+        }
+        
+        matrixParams.transform_0.push_back(transform_0_clone);
+        matrixParams.transform_45.push_back(transform_45_clone);
+        matrixParams.localToCamera.push_back(localToCamera_clone);
+        
+        // Calculate Camera -> World matrices
+        // CameraToWorld = LocalToWorld * CameraToLocal
+        // CameraToLocal = (LocalToCamera)^(-1)
+        // Therefore: CameraToWorld = LocalToWorld * (LocalToCamera)^(-1)
+        // For 0 degrees: CameraToWorld0 = Transform_0 * CameraRT^(-1)
+        // For 45 degrees: CameraToWorld45 = Transform_45 * CameraRT^(-1)
+        
+        // Check if LocalToCamera is actually loaded (use cloned version)
+        bool isLocalToCameraLoaded = false;
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                if (i == j && abs(localToCamera_clone.at<float>(i, j) - 1.0f) > 1e-6) {
+                    isLocalToCameraLoaded = true;
+                    break;
+                } else if (i != j && abs(localToCamera_clone.at<float>(i, j)) > 1e-6) {
+                    isLocalToCameraLoaded = true;
                     break;
                 }
             }
+            if (isLocalToCameraLoaded) break;
+        }
+        
+        if (isLocalToCameraLoaded) {
+            cv::Mat localToCameraInv = localToCamera_clone.inv(cv::DECOMP_SVD);
             
-            // Only increment row if we successfully parsed 4 values
-            if (hasValidData && col == 4) {
-                std::cout << "Successfully parsed line " << lineNum << ": " << line << std::endl;
-                row++;
-            } else if (hasValidData && col > 0) {
-                // Partial data, might be end of matrix
-                std::cout << "Warning: Partial data on line " << lineNum << ": " << line << std::endl;
+            // Validate inverse matrix
+            if (localToCameraInv.empty() || localToCameraInv.rows != 4 || localToCameraInv.cols != 4) {
+                std::cout << "Warning: Invalid localToCameraInv for frame " << currentFrameIdx << ", using transform directly" << std::endl;
+                matrixParams.cameraToWorld0.push_back(transform_0_clone.clone());
+                matrixParams.cameraToWorld45.push_back(transform_45_clone.clone());
+            } else {
+                cv::Mat cameraToWorld0 = transform_0_clone * localToCameraInv;
+                cv::Mat cameraToWorld45 = transform_45_clone * localToCameraInv;
+                
+                // Validate multiplication results before cloning
+                if (cameraToWorld0.empty() || cameraToWorld0.rows != 4 || cameraToWorld0.cols != 4 ||
+                    cameraToWorld45.empty() || cameraToWorld45.rows != 4 || cameraToWorld45.cols != 4) {
+                    std::cout << "Warning: Invalid cameraToWorld matrices for frame " << currentFrameIdx << ", using transform directly" << std::endl;
+                    matrixParams.cameraToWorld0.push_back(transform_0_clone.clone());
+                    matrixParams.cameraToWorld45.push_back(transform_45_clone.clone());
+                } else {
+                    // Clone immediately to avoid any reference issues
+                    cv::Mat cameraToWorld0_clone = cameraToWorld0.clone();
+                    cv::Mat cameraToWorld45_clone = cameraToWorld45.clone();
+                    
+                    // Final validation before storing
+                    if (cameraToWorld0_clone.empty() || cameraToWorld45_clone.empty()) {
+                        std::cout << "Warning: Failed to clone cameraToWorld matrices for frame " << currentFrameIdx << ", using transform directly" << std::endl;
+                        matrixParams.cameraToWorld0.push_back(transform_0_clone.clone());
+                        matrixParams.cameraToWorld45.push_back(transform_45_clone.clone());
+                    } else {
+                        matrixParams.cameraToWorld0.push_back(cameraToWorld0_clone);
+                        matrixParams.cameraToWorld45.push_back(cameraToWorld45_clone);
+                    }
+                }
             }
+        } else {
+            // Use cloned versions
+            matrixParams.cameraToWorld0.push_back(transform_0_clone.clone());
+            matrixParams.cameraToWorld45.push_back(transform_45_clone.clone());
+        }
+        
+        if ((currentFrameIdx + 1) % 10 == 0 || currentFrameIdx == 0) {
+            std::cout << "Loaded matrix for frame " << currentFrameIdx << " (" << (currentFrameIdx + 1) << "/" << maxFrames << ")" << std::endl;
         }
     }
     
-    file.close();
-    
-    // Store matrices in vector
-    matrixParams.transform_0.push_back(transform_0);
-    matrixParams.transform_45.push_back(transform_45);
-    matrixParams.localToCamera.push_back(localToCamera);
-    
-    // Calculate Camera -> World matrices
-    // CameraToWorld = LocalToWorld * CameraToLocal
-    // CameraToLocal = (LocalToCamera)^(-1)
-    // Therefore: CameraToWorld = LocalToWorld * (LocalToCamera)^(-1)
-    // For 0 degrees: CameraToWorld0 = Transform_0 * CameraRT^(-1)
-    // For 45 degrees: CameraToWorld45 = Transform_45 * CameraRT^(-1)
-    
-    std::cout << "\n=== Matrix Debug Info ===" << std::endl;
-    std::cout << "Transform_0:" << std::endl;
-    std::cout << transform_0 << std::endl;
-    std::cout << "Transform_45:" << std::endl;
-    std::cout << transform_45 << std::endl;
-    std::cout << "LocalToCamera (CameraRT):" << std::endl;
-    std::cout << localToCamera << std::endl;
-    
-    // Check if LocalToCamera is actually loaded
-    bool isLocalToCameraLoaded = false;
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            if (i == j && abs(localToCamera.at<float>(i, j) - 1.0f) > 1e-6) {
-                isLocalToCameraLoaded = true;
-                break;
-            } else if (i != j && abs(localToCamera.at<float>(i, j)) > 1e-6) {
-                isLocalToCameraLoaded = true;
-                break;
-            }
-        }
-        if (isLocalToCameraLoaded) break;
-    }
-    
-    std::cout << "LocalToCamera loaded: " << (isLocalToCameraLoaded ? "YES" : "NO") << std::endl;
-    
-    if (isLocalToCameraLoaded) {
-        cv::Mat localToCameraInv = localToCamera.inv(cv::DECOMP_SVD);
-        std::cout << "LocalToCamera^(-1):" << std::endl;
-        std::cout << localToCameraInv << std::endl;
-        
-        cv::Mat cameraToWorld0 = transform_0 * localToCameraInv;
-        std::cout << "CameraToWorld0 = Transform_0 * CameraRT^(-1):" << std::endl;
-        std::cout << cameraToWorld0 << std::endl;
-        
-        cv::Mat cameraToWorld45 = transform_45 * localToCameraInv;
-        
-        matrixParams.cameraToWorld0.push_back(cameraToWorld0);
-        matrixParams.cameraToWorld45.push_back(cameraToWorld45);
-    } else {
-        std::cout << "WARNING: LocalToCamera is identity, using Transform_0/45 directly" << std::endl;
-        matrixParams.cameraToWorld0.push_back(transform_0);
-        matrixParams.cameraToWorld45.push_back(transform_45);
-    }
-    std::cout << "========================\n" << std::endl;
-    
-    std::cout << "Loaded matrix from: " << filePath << std::endl;
-
-    std::cout << "Matrix loading completed! Loaded:" << std::endl;
+    std::cout << "\nMatrix loading completed! Loaded:" << std::endl;
     std::cout << "  - Transform_0 (Local->World, 0°): " << matrixParams.transform_0.size() << " matrices" << std::endl;
     std::cout << "  - Transform_45 (Local->World, 45°): " << matrixParams.transform_45.size() << " matrices" << std::endl;
     std::cout << "  - LocalToCamera: " << matrixParams.localToCamera.size() << " matrices" << std::endl;
@@ -701,11 +744,11 @@ void ScanDataLoader::loadPointCloudParams() {
     }
     
     // Limit to maximum 10 frames (or available frames if less)
-    int maxFrames = std::min(availableFrames, 10);
+    int maxFrames = std::min(availableFrames, frame_idx);
     std::cout << "Found " << availableFrames << " frames, loading first " << maxFrames << " frames..." << std::endl;
     
-    pointCloudParams.clear();
-    pointCloudParams.reserve(maxFrames);
+    PCDs.clear();
+    PCDs.reserve(maxFrames);
     
     // Load multiple frames
     for (int i = 0; i < maxFrames; ++i) {
@@ -721,10 +764,10 @@ void ScanDataLoader::loadPointCloudParams() {
         std::cout << "Loaded frame " << i << " - src_0: " << pointCloudFrame.src_0.points.size() 
                   << " points, src_45: " << pointCloudFrame.src_45.points.size() << " points" << std::endl;
         
-        pointCloudParams.push_back(pointCloudFrame);
+        PCDs.push_back(pointCloudFrame);
     }
     
-    std::cout << "Loaded " << pointCloudParams.size() << " point cloud frames" << std::endl;
+    std::cout << "Loaded " << PCDs.size() << " point cloud frames" << std::endl;
 }
 
 
@@ -800,7 +843,7 @@ void ScanDataLoader::loadCameraParams() {
 
     // Read integrated mesh file
     char filename[32];
-    sprintf_s(filename, sizeof(filename), "%06d_intrinsic.txt", frame_idx);
+    sprintf_s(filename, sizeof(filename), "%06d_intrinsic.txt", 0);
     std::string filePath = cameraParamsPath + "/" + filename;
 
 
@@ -875,9 +918,9 @@ bool ScanDataLoader::load() {
     
     try {
         loadBaseParams();
-        loadImageParams();
+        // loadImageParams();
         loadMatrixParams();
-        loadDepthMapParams();
+        // loadDepthMapParams();
         loadPointCloudParams();
         loadCameraParams();
         
@@ -950,10 +993,10 @@ void ScanDataLoader::printSummary() const {
     }
     
     std::cout << "Point Cloud Parameters:" << std::endl;
-    std::cout << "  - Total frames loaded: " << pointCloudParams.size() << std::endl;
-    for (size_t i = 0; i < pointCloudParams.size(); ++i) {
-        std::cout << "  - Frame " << i << ": src_0=" << pointCloudParams[i].src_0.points.size() 
-                  << " points, src_45=" << pointCloudParams[i].src_45.points.size() << " points" << std::endl;
+    std::cout << "  - Total frames loaded: " << PCDs.size() << std::endl;
+    for (size_t i = 0; i < PCDs.size(); ++i) {
+        std::cout << "  - Frame " << i << ": src_0=" << PCDs[i].src_0.points.size()
+                  << " points, src_45=" << PCDs[i].src_45.points.size() << " points" << std::endl;
     }
 }
 

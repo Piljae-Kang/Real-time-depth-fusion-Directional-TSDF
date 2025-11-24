@@ -18,6 +18,8 @@ struct HashSlot {
  * VoxelData: Per-voxel data structure
  * Stores color, SDF value, weight, and directional TSDF data
  */
+
+//__align__(16)
 struct VoxelData {
     uchar3 color;          // RGB color
     uchar weight;          // Integration confidence/weight

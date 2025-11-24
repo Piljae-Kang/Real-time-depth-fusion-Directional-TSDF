@@ -100,8 +100,11 @@ private:
     ImageParams imageParams;
     MatrixParams matrixParams;
     DepthMapParams depthMapParams;
-    std::vector<PointCloudParams> pointCloudParams;  // Changed to vector for multiple frames
     CameraParams cameraParams;
+
+
+    std::vector<PointCloudParams> PCDs;  // Changed to vector for multiple frames
+    std::vector<cv::Mat> color_imgs;
 
 
     // Load base parameters
@@ -143,9 +146,9 @@ public:
     const ImageParams& getImageParams() const { return imageParams; }
     const MatrixParams& getMatrixParams() const { return matrixParams; }
     const DepthMapParams& getDepthMapParams() const { return depthMapParams; }
-    const PointCloudParams& getPointCloudParams() const { return pointCloudParams.empty() ? throw std::runtime_error("No point cloud data loaded") : pointCloudParams[0]; }  // Backward compatibility: returns first frame
-    const PointCloudParams& getPointCloudParams(int frameIndex) const { return pointCloudParams.at(frameIndex); }  // Get specific frame
-    const std::vector<PointCloudParams>& getAllPointCloudParams() const { return pointCloudParams; }  // Get all frames
+    const PointCloudParams& getPointCloudParams() const { return PCDs.empty() ? throw std::runtime_error("No point cloud data loaded") : PCDs[0]; }  // Backward compatibility: returns first frame
+    const PointCloudParams& getPointCloudParams(int frameIndex) const { return PCDs.at(frameIndex); }  // Get specific frame
+    const std::vector<PointCloudParams>& getAllPointCloudParams() const { return PCDs; }  // Get all frames
     const CameraParams& getCameraParams() const { return cameraParams; }
     
     void printSummary() const;
@@ -156,11 +159,9 @@ public:
     // Save a single depth map frame to disk (writes bin + preview PNG)
     bool saveDepthMapFrame(const std::string& outputDir, const std::string& resolution, int frameIndex) const;
 
-    int frame_idx = 2;
+    int frame_idx = 200;
 
     int width = 400;  int height = 480; // image resolution (img_params)
     int h_depthWidth = 450; int h_depthHeight = 550; // depthmap resolution (different from image)
     int l_depthWidth = 450; int l_depthHeight = 550; // depthmap resolution (different from image)
 };
-
-

@@ -159,6 +159,7 @@ __device__ bool trilinearInterpolationSimpleFastFast(
     
     dist = 0.0f;
     float3 colorFloat = make_float3(0.0f, 0.0f, 0.0f);
+    float validWeightSum = 0.0f;
     
     // Sample 8 surrounding voxels
     for (int i = 0; i < 8; i++) {
@@ -170,10 +171,18 @@ __device__ bool trilinearInterpolationSimpleFastFast(
             posDual.y + addY,
             posDual.z + addZ
         );
-        
+
+        //printf("%f %f %f\n", dist, offsetPos.x, offsetPos.y, offsetPos.z);
+
+
         // Get voxel at this position (reverted)
         VoxelData voxel = getVoxel(d_hashTable, numBuckets, bucketSize, totalHashSize, d_SDFBlocks, offsetPos, voxelSize);
-        if (voxel.weight == 0) return false;
+        if (voxel.weight == 0) {
+            continue;
+        }
+
+
+
         float3 vColor = make_float3(voxel.color.x, voxel.color.y, voxel.color.z);
         
         // Calculate weight for this corner
@@ -185,13 +194,23 @@ __device__ bool trilinearInterpolationSimpleFastFast(
         colorFloat.x += w * vColor.x;
         colorFloat.y += w * vColor.y;
         colorFloat.z += w * vColor.z;
+        validWeightSum += w;
     }
     
-    // Reverted: early exit happens per-corner when weight==0
-
-    //printf("voxel dist : %f\n", dist);
+    if (validWeightSum <= 1e-6f) {
+        return false;
+    }
+    
+    float invWeight = 1.0f / validWeightSum;
+    dist *= invWeight;
+    colorFloat.x *= invWeight;
+    colorFloat.y *= invWeight;
+    colorFloat.z *= invWeight;
     
     color = make_uchar3((unsigned char)colorFloat.x, (unsigned char)colorFloat.y, (unsigned char)colorFloat.z);
+
+    //printf("dist : %f, validWeightSum : %f\n", dist, validWeightSum);
+
     return true;
 }
 
@@ -295,14 +314,16 @@ __device__ void traverseCoarseGridSimpleSampleAll(
         float dist;
         uchar3 color;
 
-        printf("%f %f %f\n", currentPosWorld.x, currentPosWorld.y, currentPosWorld.z);
+        //printf("%f %f %f\n", currentPosWorld.x, currentPosWorld.y, currentPosWorld.z);
         
         if (trilinearInterpolationSimpleFastFast(d_hashTable, numBuckets, bucketSize, totalHashSize, d_SDFBlocks,
                                                 currentPosWorld, dist, color, voxelSize)) {
             if (lastWeight > 0 && lastSdf < 0.0f && dist > 0.0f) {
 
-                printf("-----------------------------\n");
-                printf("-----------change---------\n");
+                //printf("-----------------------------\n");
+                //printf("-----------change---------\n");
+                //printf("%f %f %f\n", currentPosWorld.x, currentPosWorld.y, currentPosWorld.z);
+
 
 
 
@@ -413,9 +434,11 @@ __global__ void renderKernel(
         
         int pixelIdx = y * width + x;
 
-        //if (pixelIdx != 186748 && pixelIdx != 0) {
+        //if (pixelIdx != 120200) {
         //    return;
         //}
+
+        //printf("x, y : %d, %d\n", x, y);
         
         // Initialize output to invalid
         d_depth[pixelIdx] = MINF;
@@ -429,8 +452,6 @@ __global__ void renderKernel(
             (y - cy) / fy,
             1.0f
         );
-
-        
 
         float camDirLength = sqrtf(camDir.x * camDir.x + camDir.y * camDir.y + camDir.z * camDir.z);
         if (camDirLength > 1e-6f) {
@@ -596,5 +617,292 @@ extern "C" void rayCastRenderCUDA(
     
     cudaFree(d_rayHitCount);
     cudaFree(d_rayMissCount);
+}
+
+// ============================================================================
+// Voxelwise Surface Point Extraction
+// ============================================================================
+
+/**
+ * Compute normal from SDF gradient (finite difference)
+ */
+__device__ float3 computeNormalFromSDF(
+    const HashSlot* d_hashTable,
+    int numBuckets,
+    int bucketSize,
+    int totalHashSize,
+    VoxelData* d_SDFBlocks,
+    const float3& worldPos,
+    float voxelSize
+) {
+    const float eps = voxelSize * 0.5f;
+    
+    float3 grad = make_float3(0.0f, 0.0f, 0.0f);
+    
+    // X gradient
+    float3 posX = make_float3(worldPos.x + eps, worldPos.y, worldPos.z);
+    float3 posXNeg = make_float3(worldPos.x - eps, worldPos.y, worldPos.z);
+    VoxelData voxX = getVoxel(d_hashTable, numBuckets, bucketSize, totalHashSize, d_SDFBlocks, posX, voxelSize);
+    VoxelData voxXNeg = getVoxel(d_hashTable, numBuckets, bucketSize, totalHashSize, d_SDFBlocks, posXNeg, voxelSize);
+    if (voxX.weight > 0 && voxXNeg.weight > 0) {
+        grad.x = (voxX.sdf - voxXNeg.sdf) / (2.0f * eps);
+    }
+    
+    // Y gradient
+    float3 posY = make_float3(worldPos.x, worldPos.y + eps, worldPos.z);
+    float3 posYNeg = make_float3(worldPos.x, worldPos.y - eps, worldPos.z);
+    VoxelData voxY = getVoxel(d_hashTable, numBuckets, bucketSize, totalHashSize, d_SDFBlocks, posY, voxelSize);
+    VoxelData voxYNeg = getVoxel(d_hashTable, numBuckets, bucketSize, totalHashSize, d_SDFBlocks, posYNeg, voxelSize);
+    if (voxY.weight > 0 && voxYNeg.weight > 0) {
+        grad.y = (voxY.sdf - voxYNeg.sdf) / (2.0f * eps);
+    }
+    
+    // Z gradient
+    float3 posZ = make_float3(worldPos.x, worldPos.y, worldPos.z + eps);
+    float3 posZNeg = make_float3(worldPos.x, worldPos.y, worldPos.z - eps);
+    VoxelData voxZ = getVoxel(d_hashTable, numBuckets, bucketSize, totalHashSize, d_SDFBlocks, posZ, voxelSize);
+    VoxelData voxZNeg = getVoxel(d_hashTable, numBuckets, bucketSize, totalHashSize, d_SDFBlocks, posZNeg, voxelSize);
+    if (voxZ.weight > 0 && voxZNeg.weight > 0) {
+        grad.z = (voxZ.sdf - voxZNeg.sdf) / (2.0f * eps);
+    }
+    
+    // Normalize gradient to get normal
+    float len = sqrtf(grad.x * grad.x + grad.y * grad.y + grad.z * grad.z);
+    if (len > 1e-6f) {
+        grad.x /= len;
+        grad.y /= len;
+        grad.z /= len;
+    }
+    
+    return grad;
+}
+
+/**
+ * Kernel: Extract surface points from voxel grid
+ * Each thread processes one hash slot
+ */
+__global__ void kernelExtractSurfacePoints(
+    const HashSlot* d_hashTable,
+    int numBuckets,
+    int bucketSize,
+    int totalHashSize,
+    VoxelData* d_SDFBlocks,
+    float voxelSize,
+    float minSDF,
+    float maxSDF,
+    float4* d_outputPositions,
+    float4* d_outputColors,
+    float4* d_outputNormals,
+    int maxPoints,
+    int* d_pointCount
+) {
+    int slotIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (slotIdx >= totalHashSize) return;
+    
+    const HashSlot& slot = d_hashTable[slotIdx];
+    
+    // Skip empty slots
+    if (slot.ptr == -1) return;
+    
+    // Get block position (SDF block coordinates)
+    int3 blockPos = slot.pos;
+    
+    // Calculate block's first voxel corner position in world space
+    // blockWorldPos is the corner of the first voxel (0,0,0) in this block
+    float3 blockWorldPos = make_float3(
+        blockPos.x * SDF_BLOCK_SIZE * voxelSize,
+        blockPos.y * SDF_BLOCK_SIZE * voxelSize,
+        blockPos.z * SDF_BLOCK_SIZE * voxelSize
+    );
+    
+    // Iterate through all 8x8x8 = 512 voxels in this SDF block
+    for (int z = 0; z < SDF_BLOCK_SIZE; z++) {
+        for (int y = 0; y < SDF_BLOCK_SIZE; y++) {
+            for (int x = 0; x < SDF_BLOCK_SIZE; x++) {
+                // Calculate local voxel index within block (0-511)
+                int voxelIdx = x + y * SDF_BLOCK_SIZE + z * (SDF_BLOCK_SIZE * SDF_BLOCK_SIZE);
+                
+                // Calculate global voxel index in d_SDFBlocks array
+                // slot.ptr points to the start of this block's voxel data
+                // Each block has SDF_BLOCK_SIZE^3 = 512 voxels
+                int globalVoxelIdx = slot.ptr * (SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE) + voxelIdx;
+                
+                // Get voxel data from global array
+                VoxelData voxel = d_SDFBlocks[globalVoxelIdx];
+                
+                // Skip invalid voxels
+                if (voxel.weight == 0) continue;
+                
+                // Check if SDF is within surface range (near zero)
+                // Use wider range to capture more surface points
+                if (voxel.sdf < minSDF || voxel.sdf > maxSDF) continue;
+                
+                // Calculate voxel center position in world space
+                float3 voxelCenter = make_float3(
+                    blockWorldPos.x + (x + 0.5f) * voxelSize,
+                    blockWorldPos.y + (y + 0.5f) * voxelSize,
+                    blockWorldPos.z + (z + 0.5f) * voxelSize
+                );
+                
+                // Find iso-surface position using SDF values only (no normal needed)
+                // Check 6 neighbors to find zero-crossing
+                float3 isoPos = make_float3(0.0f, 0.0f, 0.0f);
+                float3 accumulatedPos = make_float3(0.0f, 0.0f, 0.0f);
+                int validNeighbors = 0;
+                
+                // Check 6 neighbors (x+, x-, y+, y-, z+, z-)
+                int offsets[6][3] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
+                float3 directions[6] = {
+                    make_float3(1.0f, 0.0f, 0.0f),
+                    make_float3(-1.0f, 0.0f, 0.0f),
+                    make_float3(0.0f, 1.0f, 0.0f),
+                    make_float3(0.0f, -1.0f, 0.0f),
+                    make_float3(0.0f, 0.0f, 1.0f),
+                    make_float3(0.0f, 0.0f, -1.0f)
+                };
+                
+                for (int dir = 0; dir < 6; dir++) {
+                    int nx = x + offsets[dir][0];
+                    int ny = y + offsets[dir][1];
+                    int nz = z + offsets[dir][2];
+                    
+                    // Check if neighbor is within block bounds
+                    if (nx < 0 || nx >= SDF_BLOCK_SIZE ||
+                        ny < 0 || ny >= SDF_BLOCK_SIZE ||
+                        nz < 0 || nz >= SDF_BLOCK_SIZE) {
+                        // Neighbor is in different block - need to query via hash table
+                        float3 neighborPos = make_float3(
+                            voxelCenter.x + directions[dir].x * voxelSize,
+                            voxelCenter.y + directions[dir].y * voxelSize,
+                            voxelCenter.z + directions[dir].z * voxelSize
+                        );
+                        VoxelData neighborVoxel = getVoxel(d_hashTable, numBuckets, bucketSize, totalHashSize,
+                                                           d_SDFBlocks, neighborPos, voxelSize);
+                        if (neighborVoxel.weight == 0) continue;
+                        
+                        // Check for zero-crossing: different signs
+                        if ((voxel.sdf < 0.0f && neighborVoxel.sdf > 0.0f) ||
+                            (voxel.sdf > 0.0f && neighborVoxel.sdf < 0.0f)) {
+                            // Linear interpolation to find SDF=0 position
+                            float t = voxel.sdf / (voxel.sdf - neighborVoxel.sdf);
+                            float3 zeroPos = make_float3(
+                                voxelCenter.x + directions[dir].x * voxelSize * t,
+                                voxelCenter.y + directions[dir].y * voxelSize * t,
+                                voxelCenter.z + directions[dir].z * voxelSize * t
+                            );
+                            accumulatedPos.x += zeroPos.x;
+                            accumulatedPos.y += zeroPos.y;
+                            accumulatedPos.z += zeroPos.z;
+                            validNeighbors++;
+                        }
+                    } else {
+                        // Neighbor is in same block
+                        int neighborVoxelIdx = nx + ny * SDF_BLOCK_SIZE + nz * (SDF_BLOCK_SIZE * SDF_BLOCK_SIZE);
+                        int neighborGlobalIdx = slot.ptr * (SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE) + neighborVoxelIdx;
+                        VoxelData neighborVoxel = d_SDFBlocks[neighborGlobalIdx];
+                        if (neighborVoxel.weight == 0) continue;
+                        
+                        // Check for zero-crossing: different signs
+                        if ((voxel.sdf < 0.0f && neighborVoxel.sdf > 0.0f) ||
+                            (voxel.sdf > 0.0f && neighborVoxel.sdf < 0.0f)) {
+                            // Linear interpolation to find SDF=0 position
+                            float t = voxel.sdf / (voxel.sdf - neighborVoxel.sdf);
+                            float3 zeroPos = make_float3(
+                                voxelCenter.x + directions[dir].x * voxelSize * t,
+                                voxelCenter.y + directions[dir].y * voxelSize * t,
+                                voxelCenter.z + directions[dir].z * voxelSize * t
+                            );
+                            accumulatedPos.x += zeroPos.x;
+                            accumulatedPos.y += zeroPos.y;
+                            accumulatedPos.z += zeroPos.z;
+                            validNeighbors++;
+                        }
+                    }
+                }
+                
+                // If no zero-crossing found, use voxel center if SDF is very close to zero
+                // Also allow points even if zero-crossing is not found but SDF is within range
+                if (validNeighbors == 0) {
+                    if (fabsf(voxel.sdf) < 0.001f) {
+
+                    //if (fabsf(voxel.sdf) <= fmaxf(fabsf(minSDF), fabsf(maxSDF))) {
+                        isoPos = voxelCenter;
+                    } else {
+                        continue; // No surface in this voxel
+                    }
+                } else {
+                    // Average of all zero-crossing positions
+                    isoPos.x = accumulatedPos.x / validNeighbors;
+                    isoPos.y = accumulatedPos.y / validNeighbors;
+                    isoPos.z = accumulatedPos.z / validNeighbors;
+                }
+                
+                // Compute normal from SDF gradient (for output, not for position calculation)
+                float3 normal = computeNormalFromSDF(
+                    d_hashTable, numBuckets, bucketSize, totalHashSize,
+                    d_SDFBlocks, isoPos, voxelSize
+                );
+                
+                // Atomically get next output index
+                int outputIdx = atomicAdd(d_pointCount, 1);
+                
+                if (outputIdx >= maxPoints) {
+                    // Buffer full, skip this point
+                    return;
+                }
+                
+                // Write output
+                d_outputPositions[outputIdx] = make_float4(isoPos.x, isoPos.y, isoPos.z, 1.0f);
+                d_outputColors[outputIdx] = make_float4(
+                    (float)voxel.color.x / 255.0f,
+                    (float)voxel.color.y / 255.0f,
+                    (float)voxel.color.z / 255.0f,
+                    1.0f
+                );
+                d_outputNormals[outputIdx] = make_float4(normal.x, normal.y, normal.z, 0.0f);
+            }
+        }
+    }
+}
+
+/**
+ * Host function: Extract surface points from voxel grid
+ */
+extern "C" void extractSurfacePointsCUDA(
+    const CUDAHashRef& hashData,
+    const Params& params,
+    float minSDF,
+    float maxSDF,
+    float4* d_outputPositions,
+    float4* d_outputColors,
+    float4* d_outputNormals,
+    int maxPoints,
+    int* d_pointCount
+) {
+    // Reset point count
+    cudaMemset(d_pointCount, 0, sizeof(int));
+    
+    // Launch kernel
+    int threadsPerBlock = 256;
+    int numBlocks = (params.totalHashSize + threadsPerBlock - 1) / threadsPerBlock;
+    
+    kernelExtractSurfacePoints<<<numBlocks, threadsPerBlock>>>(
+        hashData.d_hashTable,
+        params.hashSlotNum,
+        params.slotSize,
+        params.totalHashSize,
+        hashData.d_SDFBlocks,
+        params.voxelSize,
+        minSDF,
+        maxSDF,
+        d_outputPositions,
+        d_outputColors,
+        d_outputNormals,
+        maxPoints,
+        d_pointCount
+    );
+    
+    cudaDeviceSynchronize();
 }
 
