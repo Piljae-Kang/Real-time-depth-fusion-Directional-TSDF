@@ -31,7 +31,7 @@ extern "C" void allocBlocksFromDepthMapMethod2CUDA(CUDAHashRef & hashData, const
 
 // Legacy function (calls Method 1 for backward compatibility)
 extern "C" void allocBlocksFromDepthMapCUDA(CUDAHashRef & hashData, const Params & params,
-    const float3* depthmap, int width, int height, float truncationDistance,
+    const float3* depthmap, const float3* normalmap, int width, int height, float truncationDistance,
     float3 cameraPos, float* cameraTransform);
 extern "C" void integrateDepthMapIntoBlocksCUDA(CUDAHashRef & hashData, const Params & params,
     const float3* depthmap, const uchar3* colormap, const float3* normalmap,

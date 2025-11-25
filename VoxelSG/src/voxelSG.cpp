@@ -23,8 +23,16 @@ int main() {
 
 
 #ifdef HUBITZ_DATA_NEW
+    
+    //std::string data_name = "scan_20251124_150352.887"; // teeth 1
+     
+    // std::string data_name = "scan_20251125_110032.152"; // teeth 2
 
-    std::string scanDataPath = "C:\\Users\\pjkang\\Desktop\\PLUGIN Release\\PLUGIN Release\\scanData\\scan_20251124_150352.887";
+    // std::string data_name = "scan_20251125_144629.196"; // Thin object
+
+    std::string data_name = "scan_20251125_153835.792"; // Thin object2
+
+    std::string scanDataPath = "C:\\Users\\pjkang\\Desktop\\PLUGIN Release\\PLUGIN Release\\scanData\\" + data_name;
 
     ScanDataLoader loader(scanDataPath);
 
@@ -123,6 +131,8 @@ int main() {
 
     GlobalParamsConfig::get().initialize();
     GlobalParamsConfig::get().print();
+
+    GlobalParamsConfig::get().g_data_name = data_name;
 
     Params params(GlobalParamsConfig::get());
 
@@ -559,7 +569,7 @@ int main() {
                             
                             // Use wider SDF range to capture more surface points
                             // -0.05 to 0.05 covers more voxels near the surface
-                            int numPoints = renderer.extractSurfacePoints(&scene, -0.1f, 0.1f);
+                            int numPoints = renderer.extractSurfacePoints(&scene, -0.01f, 0.01f, 5);
                             
                             if (numPoints > 0) {
                                 std::string surfacePlyPath = runOutputDir + "/extract_points_from_voxel/surface_points_frame_" + std::to_string(i) + ".ply";

@@ -690,6 +690,7 @@ __global__ void kernelExtractSurfacePoints(
     float voxelSize,
     float minSDF,
     float maxSDF,
+    unsigned int minWeight,
     float4* d_outputPositions,
     float4* d_outputColors,
     float4* d_outputNormals,
@@ -731,8 +732,8 @@ __global__ void kernelExtractSurfacePoints(
                 // Get voxel data from global array
                 VoxelData voxel = d_SDFBlocks[globalVoxelIdx];
                 
-                // Skip invalid voxels
-                if (voxel.weight == 0) continue;
+                // Skip invalid voxels or voxels with weight below threshold
+                if (voxel.weight == 0 || voxel.weight < minWeight) continue;
                 
                 // Check if SDF is within surface range (near zero)
                 // Use wider range to capture more surface points
@@ -874,6 +875,7 @@ extern "C" void extractSurfacePointsCUDA(
     const Params& params,
     float minSDF,
     float maxSDF,
+    unsigned int minWeight,
     float4* d_outputPositions,
     float4* d_outputColors,
     float4* d_outputNormals,
@@ -896,6 +898,7 @@ extern "C" void extractSurfacePointsCUDA(
         params.voxelSize,
         minSDF,
         maxSDF,
+        minWeight,
         d_outputPositions,
         d_outputColors,
         d_outputNormals,

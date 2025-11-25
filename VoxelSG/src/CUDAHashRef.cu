@@ -26,6 +26,8 @@ CUDAHashRef::CUDAHashRef()
       d_CompactifiedHashTable(nullptr),
       d_hashCompactifiedCounter(nullptr),
       d_SDFBlocks(nullptr),
+      d_blockParentUV(nullptr),
+      d_blockAllocationMethod(nullptr),
       d_hashBucketMutex(nullptr),
       d_heap(nullptr),
       d_heapCounter(nullptr),
@@ -72,6 +74,21 @@ void CUDAHashRef::HashDataAllocation(const Params params) {
         checkCuda(cudaMemset(d_SDFBlocks, 0, voxel_bytes));
         logDeviceAlloc("SDFBlocks", voxel_bytes);
         totalAllocatedBytes += voxel_bytes;
+    }
+
+    if (params.SDFBlockNum > 0) {
+        size_t parentBytes = static_cast<size_t>(params.SDFBlockNum) * sizeof(int2);
+        checkCuda(cudaMalloc(reinterpret_cast<void**>(&d_blockParentUV), parentBytes));
+        // Initialize to -1 (0xFF) so we can detect unset entries
+        checkCuda(cudaMemset(d_blockParentUV, 0xFF, parentBytes));
+        logDeviceAlloc("BlockParentUV", parentBytes);
+        totalAllocatedBytes += parentBytes;
+
+        size_t methodBytes = static_cast<size_t>(params.SDFBlockNum) * sizeof(unsigned char);
+        checkCuda(cudaMalloc(reinterpret_cast<void**>(&d_blockAllocationMethod), methodBytes));
+        checkCuda(cudaMemset(d_blockAllocationMethod, 0, methodBytes));
+        logDeviceAlloc("BlockAllocMethod", methodBytes);
+        totalAllocatedBytes += methodBytes;
     }
 
     // Mutex array for hash buckets — assume one per bucket

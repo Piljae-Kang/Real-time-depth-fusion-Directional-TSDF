@@ -36,6 +36,7 @@ extern "C" void extractSurfacePointsCUDA(
     const Params& params,
     float minSDF,
     float maxSDF,
+    unsigned int minWeight,
     float4* d_outputPositions,
     float4* d_outputColors,
     float4* d_outputNormals,
@@ -305,7 +306,8 @@ bool RayCastRender::savePointCloudPLY(const std::string& filePath) {
  */
 int RayCastRender::extractSurfacePoints(const VoxelScene* voxelScene,
                                         float minSDF,
-                                        float maxSDF) {
+                                        float maxSDF,
+                                        unsigned int minWeight) {
     if (!voxelScene) {
         std::cerr << "RayCastRender::extractSurfacePoints: Invalid voxelScene!" << std::endl;
         return 0;
@@ -344,6 +346,7 @@ int RayCastRender::extractSurfacePoints(const VoxelScene* voxelScene,
         params,
         minSDF,
         maxSDF,
+        minWeight,
         m_d_extractedPositions,
         m_d_extractedColors,
         m_d_extractedNormals,
@@ -355,7 +358,8 @@ int RayCastRender::extractSurfacePoints(const VoxelScene* voxelScene,
     cudaMemcpy(&m_numExtractedPoints, m_d_extractedCount, sizeof(int), cudaMemcpyDeviceToHost);
     
     std::cout << "RayCastRender::extractSurfacePoints: Extracted " << m_numExtractedPoints 
-              << " surface points (SDF range: [" << minSDF << ", " << maxSDF << "])" << std::endl;
+              << " surface points (SDF range: [" << minSDF << ", " << maxSDF 
+              << "], minWeight: " << minWeight << ")" << std::endl;
     
     return m_numExtractedPoints;
 }

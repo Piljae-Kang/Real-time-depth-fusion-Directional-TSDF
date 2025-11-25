@@ -93,11 +93,13 @@ public:
      * @param voxelScene pointer to VoxelScene containing SDF data
      * @param minSDF minimum SDF threshold for surface extraction
      * @param maxSDF maximum SDF threshold for surface extraction
+     * @param minWeight minimum weight threshold for point extraction (default: 1)
      * @return number of extracted points
      */
     int extractSurfacePoints(const VoxelScene* voxelScene,
                              float minSDF = -0.01f,
-                             float maxSDF = 0.01f);
+                             float maxSDF = 0.01f,
+                             unsigned int minWeight = 1);
     
     /**
      * Save extracted surface points as PLY

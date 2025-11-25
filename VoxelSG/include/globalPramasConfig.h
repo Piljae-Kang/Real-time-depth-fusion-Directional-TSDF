@@ -27,6 +27,10 @@ struct vec4f {
 
 class GlobalParamsConfig {
 public:
+
+
+    std::string g_data_name;
+
     // Global variable declaration
     unsigned int g_sensorIdx;
     std::string g_sceneName;

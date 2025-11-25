@@ -61,6 +61,8 @@ public:
 
     // Voxel data
     VoxelData* d_SDFBlocks;                   // Voxel data blocks
+    int2* d_blockParentUV;                    // Per-block parent pixel (u,v)
+    unsigned char* d_blockAllocationMethod;   // Per-block allocation method (0=cam,1=normal)
     int* d_hashBucketMutex;                   // Mutex for hash buckets
 
     // Memory management

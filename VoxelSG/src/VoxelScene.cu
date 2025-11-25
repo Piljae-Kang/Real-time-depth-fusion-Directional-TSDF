@@ -4,6 +4,9 @@
 #include "../include/CUDAHashRef.h"
 #include "../include/VoxelScene.h"
 
+
+//#define USE_NORMAL_DIR_ALLOC // normal 방향으로 allocation(Method 2)
+
 // CUDA 12.9에서 atomicAdd는 기본적으로 제공됨
 
 #define HASH_SLOT_FREE      (-1)
@@ -112,20 +115,32 @@ __device__ float3 computeSign(const float3& v) {
     );
 }
 
+// Forward declaration (kept here instead of headers to avoid CUDA header pollution)
+__device__ int allocBlockWithMeta(HashSlot* d_hashTable,
+                                  unsigned int* d_heap,
+                                  unsigned int* d_heapCounter,
+                                  int* d_hashBucketMutex,
+                                  const int3& blockCoord,
+                                  int SDFBlockNum,
+                                  int numBuckets,
+                                  int bucketSize,
+                                  int totalHashSize,
+                                  bool debug = false);
+
 /**
  * Allocate a block in hash table (like expert code)
  * Uses heap counter and heap array to get free block index
  */
-__device__ void allocBlock(HashSlot* d_hashTable,
-                           unsigned int* d_heap,
-                           unsigned int* d_heapCounter,
-                           int* d_hashBucketMutex,
-                           const int3& blockCoord,
-                           int SDFBlockNum,
-                           int numBuckets,
-                           int bucketSize,
-                           int totalHashSize,
-                           bool debug = false) {
+__device__ int allocBlock(HashSlot* d_hashTable,
+                          unsigned int* d_heap,
+                          unsigned int* d_heapCounter,
+                          int* d_hashBucketMutex,
+                          const int3& blockCoord,
+                          int SDFBlockNum,
+                          int numBuckets,
+                          int bucketSize,
+                          int totalHashSize,
+                          bool debug = false) {
     unsigned int baseBucketId = hashBlockCoordinate(blockCoord, numBuckets);
     unsigned int baseBucketStart = baseBucketId * bucketSize;
 
@@ -143,7 +158,7 @@ __device__ void allocBlock(HashSlot* d_hashTable,
                 slot->pos.y == blockCoord.y &&
                 slot->pos.z == blockCoord.z) {
                 if (debug) printf("    -> Block already allocated at slot %u\n", slotIdx);
-                return;
+                return ptr;
             }
 
             if (firstEmpty == -1 && ptr == HASH_SLOT_FREE) {
@@ -163,7 +178,7 @@ __device__ void allocBlock(HashSlot* d_hashTable,
                     slot->pos.y == blockCoord.y &&
                     slot->pos.z == blockCoord.z) {
                     if (debug) printf("    -> Block already allocated at slot %u (fallback)\n", slotIdx);
-                    return;
+                    return ptr;
                 }
 
                 if (ptr == HASH_SLOT_FREE) {
@@ -176,7 +191,7 @@ __device__ void allocBlock(HashSlot* d_hashTable,
         if (firstEmpty == -1) {
             if (debug) printf("    -> No empty slot found for coord=(%d,%d,%d)\n",
                               blockCoord.x, blockCoord.y, blockCoord.z);
-            return;
+            return -1;
         }
 
         unsigned int targetBucketId = firstEmpty / bucketSize;
@@ -204,7 +219,7 @@ __device__ void allocBlock(HashSlot* d_hashTable,
                 targetSlot->pos.z == blockCoord.z) {
                 if (debug) printf("    -> Block already allocated at slot %d after locking\n", firstEmpty);
                 d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
-                return;
+                return currentPtr;
             }
 
             d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
@@ -227,7 +242,7 @@ __device__ void allocBlock(HashSlot* d_hashTable,
             }
 
             d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
-            return;
+            return static_cast<int>(blockIndex);
         } else {
             // Out of memory - restore counter and release lock
             atomicAdd((unsigned int*)d_heapCounter, 1);
@@ -236,7 +251,7 @@ __device__ void allocBlock(HashSlot* d_hashTable,
                        heapIndex, SDFBlockNum);
             }
             d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
-            return;
+            return -1;
         }
     }
 
@@ -244,6 +259,8 @@ __device__ void allocBlock(HashSlot* d_hashTable,
         printf("    -> Failed to acquire bucket lock after %d retries for coord=(%d,%d,%d)\n",
                MAX_BUCKET_RETRY, blockCoord.x, blockCoord.y, blockCoord.z);
     }
+
+    return -1;
 }
 
 // ============================================================================
@@ -287,6 +304,8 @@ __device__ void allocateBlocksAlongRay(
     unsigned int* d_heap,
     unsigned int* d_heapCounter,
     int* d_hashBucketMutex,
+    int2* d_blockParentUV,
+    unsigned char* d_blockAllocationMethod,
     float3 rayStart,
     float3 rayEnd,
     float voxelSize,
@@ -418,7 +437,7 @@ __device__ void allocateBlocksAlongRay(
         if (shouldDebug) {
             printf("  Before allocBlock: iter=%d, blockCoord=(%d,%d,%d)\n", iter, blockCoord.x, blockCoord.y, blockCoord.z);
         }
-        allocBlock(d_hashTable,
+        int blockPtr = allocBlockWithMeta(d_hashTable,
                    d_heap,
                    d_heapCounter,
                    d_hashBucketMutex,
@@ -428,6 +447,12 @@ __device__ void allocateBlocksAlongRay(
                    bucketSize,
                    totalHashSize,
                    shouldDebug);
+
+        if (allocationMethod == 1 && blockPtr >= 0 &&
+            d_blockParentUV != nullptr && d_blockAllocationMethod != nullptr) {
+            d_blockParentUV[blockPtr] = make_int2(parentPixelX, parentPixelY);
+            d_blockAllocationMethod[blockPtr] = allocationMethod;
+        }
         
         // Note: Expert code doesn't allocate neighboring blocks in the main allocation loop
         
@@ -468,6 +493,8 @@ __global__ void allocBlocksFromDepthMapMethod1Kernel(
     unsigned int* d_heap,
     unsigned int* d_heapCounter,
     int* d_hashBucketMutex,
+    int2* d_blockParentUV,
+    unsigned char* d_blockAllocationMethod,
     const float3* depthmap,
     int width, int height,
     float truncationDistance,
@@ -593,6 +620,8 @@ __global__ void allocBlocksFromDepthMapMethod1Kernel(
         d_heap,
         d_heapCounter,
         d_hashBucketMutex,
+        d_blockParentUV,
+        d_blockAllocationMethod,
         rayMin,
         rayMax,
         voxelSize,
@@ -607,42 +636,133 @@ __global__ void allocBlocksFromDepthMapMethod1Kernel(
     ); // Method 1 (camera direction, both sides)
 }
 
-// Helper function to allocate a block if it doesn't exist
-__device__ void allocateBlockIfNeeded(
+// Helper function to allocate a block if it doesn't exist. Returns block index or -1 on failure.
+__device__ int allocBlockWithMeta(
     HashSlot* d_hashTable,
+    unsigned int* d_heap,
     unsigned int* d_heapCounter,
-    int3 blockCoord,
+    int* d_hashBucketMutex,
+    const int3& blockCoord,
     int SDFBlockNum,
-    int slotCount
-) {
-    // Hash the block coordinate to get slot index
-    unsigned int slotIndex = hashBlockCoordinate(blockCoord, slotCount);
+    int numBuckets,
+    int bucketSize,
+    int totalHashSize,
+    bool debug) {
+    unsigned int baseBucketId = hashBlockCoordinate(blockCoord, numBuckets);
+    unsigned int baseBucketStart = baseBucketId * bucketSize;
 
-    // Find or allocate block in hash table
-    HashSlot* slot = &d_hashTable[slotIndex];
+    for (int retry = 0; retry < MAX_BUCKET_RETRY; ++retry) {
+        int firstEmpty = -1;
 
-    // Linear probing for hash collision
-    while (slot->ptr != -1) {
-        if (slot->pos.x == blockCoord.x &&
-            slot->pos.y == blockCoord.y &&
-            slot->pos.z == blockCoord.z) {
-            return; // Block already exists
+        // Probe within hashed bucket
+        for (int j = 0; j < bucketSize; ++j) {
+            unsigned int slotIdx = baseBucketStart + j;
+            HashSlot* slot = &d_hashTable[slotIdx];
+            int ptr = slot->ptr;
+
+            if (ptr != HASH_SLOT_FREE &&
+                slot->pos.x == blockCoord.x &&
+                slot->pos.y == blockCoord.y &&
+                slot->pos.z == blockCoord.z) {
+                return ptr;
+            }
+
+            if (firstEmpty == -1 && ptr == HASH_SLOT_FREE) {
+                firstEmpty = slotIdx;
+            }
         }
-        slotIndex = (slotIndex + 1) % slotCount;
-        slot = &d_hashTable[slotIndex];
+
+        // Fallback: linear probe entire table
+        if (firstEmpty == -1) {
+            for (int i = bucketSize; i < totalHashSize; ++i) {
+                unsigned int slotIdx = (baseBucketStart + i) % totalHashSize;
+                HashSlot* slot = &d_hashTable[slotIdx];
+                int ptr = slot->ptr;
+
+                if (ptr != HASH_SLOT_FREE &&
+                    slot->pos.x == blockCoord.x &&
+                    slot->pos.y == blockCoord.y &&
+                    slot->pos.z == blockCoord.z) {
+                    return ptr;
+                }
+
+                if (ptr == HASH_SLOT_FREE) {
+                    firstEmpty = slotIdx;
+                    break;
+                }
+            }
+        }
+
+        if (firstEmpty == -1) {
+            if (debug) {
+                printf("allocBlock: No empty slot for coord=(%d,%d,%d)\n",
+                    blockCoord.x, blockCoord.y, blockCoord.z);
+            }
+            return -1;
+        }
+
+        unsigned int targetBucketId = firstEmpty / bucketSize;
+        bool lockAcquired = false;
+        for (int spin = 0; spin < MAX_BUCKET_SPIN; ++spin) {
+            int previous = atomicExch(&d_hashBucketMutex[targetBucketId], HASH_BUCKET_LOCKED);
+            if (previous == HASH_BUCKET_UNLOCKED) {
+                lockAcquired = true;
+                break;
+            }
+        }
+
+        if (!lockAcquired) {
+            continue;
+        }
+
+        HashSlot* targetSlot = &d_hashTable[firstEmpty];
+        int currentPtr = targetSlot->ptr;
+
+        if (currentPtr != HASH_SLOT_FREE) {
+            if (targetSlot->pos.x == blockCoord.x &&
+                targetSlot->pos.y == blockCoord.y &&
+                targetSlot->pos.z == blockCoord.z) {
+                d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
+                return currentPtr;
+            }
+
+            d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
+            continue;
+        }
+
+        unsigned int heapIndex = atomicSub((unsigned int*)d_heapCounter, 1);
+        if (heapIndex > 0 && heapIndex < (unsigned int)SDFBlockNum) {
+            unsigned int blockIndex = d_heap[heapIndex];
+            targetSlot->pos = blockCoord;
+            targetSlot->offset = 0;
+            __threadfence();
+            targetSlot->ptr = static_cast<int>(blockIndex);
+            __threadfence();
+
+            if (debug) {
+                printf("allocBlock: Alloc block #%u at slot %d (coord=%d,%d,%d)\n",
+                    blockIndex, firstEmpty, blockCoord.x, blockCoord.y, blockCoord.z);
+            }
+
+            d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
+            return static_cast<int>(blockIndex);
+        } else {
+            atomicAdd((unsigned int*)d_heapCounter, 1);
+            if (debug) {
+                printf("allocBlock: Out of memory for coord=(%d,%d,%d)\n",
+                    blockCoord.x, blockCoord.y, blockCoord.z);
+            }
+            d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
+            return -1;
+        }
     }
 
-    // Allocate new block if doesn't exist
-    if (slot->ptr == -1) {
-        unsigned int blockIndex = atomicAdd((unsigned int*)d_heapCounter, 1);
-        if (blockIndex >= SDFBlockNum) {
-            return; // Out of memory
-        }
-
-        slot->pos = blockCoord;
-        slot->ptr = blockIndex;
-        slot->offset = 0;
+    if (debug) {
+        printf("allocBlock: Failed after retries for coord=(%d,%d,%d)\n",
+            blockCoord.x, blockCoord.y, blockCoord.z);
     }
+
+    return -1;
 }
 
 /**
@@ -654,6 +774,8 @@ __global__ void allocBlocksFromDepthMapMethod2Kernel(
     unsigned int* d_heap,
     unsigned int* d_heapCounter,
     int* d_hashBucketMutex,
+    int2* d_blockParentUV,
+    unsigned char* d_blockAllocationMethod,
     const float3* depthmap,
     const float3* normalmap,
     int width, int height,
@@ -747,6 +869,8 @@ __global__ void allocBlocksFromDepthMapMethod2Kernel(
         d_heap,
         d_heapCounter,
         d_hashBucketMutex,
+        d_blockParentUV,
+        d_blockAllocationMethod,
         rayStart,
         rayEnd,
         voxelSize,
@@ -775,6 +899,8 @@ __global__ void allocBlocksFromDepthMapMethod2Kernel(
         d_heap,
         d_heapCounter,
         d_hashBucketMutex,
+        d_blockParentUV,
+        d_blockAllocationMethod,
         normalRayStart,
         normalRayEnd,
         voxelSize,
@@ -796,6 +922,8 @@ __global__ void allocBlocksFromDepthMapMethod2Kernel(
 __global__ void integrateDepthMapIntoBlocksKernel(
     HashSlot* d_hashCompactified,
     VoxelData* d_SDFBlocks,
+    const int2* d_blockParentUV,
+    const unsigned char* d_blockAllocationMethod,
     const float3* depthmap,
     const uchar3* colormap,
     const float3* normalmap,
@@ -884,116 +1012,118 @@ __global__ void integrateDepthMapIntoBlocksKernel(
     //    return;
     //}
 
-    // Check if projection is within depth map bounds
-    if (screenPos.x >= 0 && screenPos.x < width && screenPos.y >= 0 && screenPos.y < height) {
-        int pixelIdx = screenPos.y * width + screenPos.x;
-        float3 depthPos_camera = depthmap[pixelIdx];
+    int pixelIdx = -1;
+    float3 depthPos_camera = make_float3(0.0f, 0.0f, 0.0f);
+    bool pixelValid = false;
 
-        //printf("pixelIdx : %d\n", pixelIdx);
-        //printf("depthPos_camera : %f %f %f\n", depthPos_camera.x, depthPos_camera.y, depthPos_camera.z);
+    int blockPtrIndex = slot.ptr;
+    int2 parentUV = make_int2(-1, -1);
+    unsigned char blockAllocMethod = 0;
+    if (d_blockParentUV != nullptr && blockPtrIndex >= 0) {
+        parentUV = d_blockParentUV[blockPtrIndex];
+    }
+    if (d_blockAllocationMethod != nullptr && blockPtrIndex >= 0) {
+        blockAllocMethod = d_blockAllocationMethod[blockPtrIndex];
+    }
 
-        // Skip invalid depth pixels
+    bool hasStoredParent = (blockAllocMethod == 1 &&
+        parentUV.x >= 0 && parentUV.x < width &&
+        parentUV.y >= 0 && parentUV.y < height);
+
+    if (hasStoredParent) {
+        pixelIdx = parentUV.y * width + parentUV.x;
+        depthPos_camera = depthmap[pixelIdx];
         if (depthPos_camera.x != 0.0f || depthPos_camera.y != 0.0f || depthPos_camera.z != 0.0f) {
-            // Transform depthPos from camera to world coordinates
-            float3 depthPos_world = make_float3(
-                cameraTransform[0] * depthPos_camera.x + cameraTransform[1] * depthPos_camera.y + cameraTransform[2] * depthPos_camera.z + cameraTransform[3],
-                cameraTransform[4] * depthPos_camera.x + cameraTransform[5] * depthPos_camera.y + cameraTransform[6] * depthPos_camera.z + cameraTransform[7],
-                cameraTransform[8] * depthPos_camera.x + cameraTransform[9] * depthPos_camera.y + cameraTransform[10] * depthPos_camera.z + cameraTransform[11]
-            );
+            pixelValid = true;
+        }
+    }
 
-            //printf("depthPos_world : %f %f %f\n", depthPos_world.x, depthPos_world.y, depthPos_world.z);
+    if (!pixelValid && screenPos.x >= 0 && screenPos.x < width && screenPos.y >= 0 && screenPos.y < height) {
+        pixelIdx = screenPos.y * width + screenPos.x;
+        depthPos_camera = depthmap[pixelIdx];
+        if (depthPos_camera.x != 0.0f || depthPos_camera.y != 0.0f || depthPos_camera.z != 0.0f) {
+            pixelValid = true;
+        }
+    }
 
+    if (!pixelValid) {
+        return;
+    }
 
-            // Calculate SDF value: distance from voxel world position to surface world position
-            float3 sdfDir = make_float3(voxelWorldPos.x - depthPos_world.x, voxelWorldPos.y - depthPos_world.y, voxelWorldPos.z - depthPos_world.z);
-            float sdfValue = sqrtf(sdfDir.x * sdfDir.x + sdfDir.y * sdfDir.y + sdfDir.z * sdfDir.z);
+    float3 depthPos_world = make_float3(
+        cameraTransform[0] * depthPos_camera.x + cameraTransform[1] * depthPos_camera.y + cameraTransform[2] * depthPos_camera.z + cameraTransform[3],
+        cameraTransform[4] * depthPos_camera.x + cameraTransform[5] * depthPos_camera.y + cameraTransform[6] * depthPos_camera.z + cameraTransform[7],
+        cameraTransform[8] * depthPos_camera.x + cameraTransform[9] * depthPos_camera.y + cameraTransform[10] * depthPos_camera.z + cameraTransform[11]
+    );
 
-            //printf("sdfValue : %f\n", sdfValue);
+    float3 sdfDir = make_float3(voxelWorldPos.x - depthPos_world.x, voxelWorldPos.y - depthPos_world.y, voxelWorldPos.z - depthPos_world.z);
+    float sdfValue = sqrtf(sdfDir.x * sdfDir.x + sdfDir.y * sdfDir.y + sdfDir.z * sdfDir.z);
 
+    float3 cameraDir = make_float3(depthPos_world.x - cameraPos.x, depthPos_world.y - cameraPos.y, depthPos_world.z - cameraPos.z);
+    float cameraDist = sqrtf(cameraDir.x * cameraDir.x + cameraDir.y * cameraDir.y + cameraDir.z * cameraDir.z);
+    float voxelDistToCamera = sqrtf((voxelWorldPos.x - cameraPos.x) * (voxelWorldPos.x - cameraPos.x) +
+        (voxelWorldPos.y - cameraPos.y) * (voxelWorldPos.y - cameraPos.y) +
+        (voxelWorldPos.z - cameraPos.z) * (voxelWorldPos.z - cameraPos.z));
 
-            // Determine sign of SDF based on direction
-            // If voxel is in front of surface (in camera direction), SDF is negative
-            // If voxel is behind surface, SDF is positive
-            float3 cameraDir = make_float3(depthPos_world.x - cameraPos.x, depthPos_world.y - cameraPos.y, depthPos_world.z - cameraPos.z);
-            float cameraDist = sqrtf(cameraDir.x * cameraDir.x + cameraDir.y * cameraDir.y + cameraDir.z * cameraDir.z);
-            float voxelDistToCamera = sqrtf((voxelWorldPos.x - cameraPos.x) * (voxelWorldPos.x - cameraPos.x) +
-                (voxelWorldPos.y - cameraPos.y) * (voxelWorldPos.y - cameraPos.y) +
-                (voxelWorldPos.z - cameraPos.z) * (voxelWorldPos.z - cameraPos.z));
+    if (voxelDistToCamera < cameraDist) {
+        sdfValue = -sdfValue;
+    }
 
-            if (voxelDistToCamera < cameraDist) {
-                sdfValue = -sdfValue; // Voxel is in front of surface
-            }
+    if (sdfValue < -truncationDistance || sdfValue > truncationDistance) {
+        return;
+    }
 
-            // Check if within truncation distance
-            if (sdfValue >= -truncationDistance && sdfValue <= truncationDistance) {
-                // Clamp SDF to truncation distance
-                sdfValue = fmaxf(-truncationDistance, fminf(truncationDistance, sdfValue));
+    sdfValue = fmaxf(-truncationDistance, fminf(truncationDistance, sdfValue));
 
-                // Get color and normal for this pixel
-                uchar3 color = colormap[pixelIdx];
-                float3 normal_camera = normalmap[pixelIdx];
+    uchar3 color = colormap[pixelIdx];
+    float3 normal_camera = normalmap[pixelIdx];
+    float normalLength = sqrtf(normal_camera.x * normal_camera.x + normal_camera.y * normal_camera.y + normal_camera.z * normal_camera.z);
+    if (normalLength > 0.0f) {
+        normal_camera.x /= normalLength;
+        normal_camera.y /= normalLength;
+        normal_camera.z /= normalLength;
+    }
 
-                // Normalize normal vector
-                float normalLength = sqrtf(normal_camera.x * normal_camera.x + normal_camera.y * normal_camera.y + normal_camera.z * normal_camera.z);
-                if (normalLength > 0.0f) {
-                    normal_camera.x /= normalLength;
-                    normal_camera.y /= normalLength;
-                    normal_camera.z /= normalLength;
-                }
+    float3 normal = make_float3(
+        cameraTransform[0] * normal_camera.x + cameraTransform[1] * normal_camera.y + cameraTransform[2] * normal_camera.z,
+        cameraTransform[4] * normal_camera.x + cameraTransform[5] * normal_camera.y + cameraTransform[6] * normal_camera.z,
+        cameraTransform[8] * normal_camera.x + cameraTransform[9] * normal_camera.y + cameraTransform[10] * normal_camera.z
+    );
 
-                // Transform normal from camera to world (rotation only, no translation)
-                float3 normal = make_float3(
-                    cameraTransform[0] * normal_camera.x + cameraTransform[1] * normal_camera.y + cameraTransform[2] * normal_camera.z,
-                    cameraTransform[4] * normal_camera.x + cameraTransform[5] * normal_camera.y + cameraTransform[6] * normal_camera.z,
-                    cameraTransform[8] * normal_camera.x + cameraTransform[9] * normal_camera.y + cameraTransform[10] * normal_camera.z
-                );
+    normalLength = sqrtf(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+    if (normalLength > 1e-6f) {
+        normal.x /= normalLength;
+        normal.y /= normalLength;
+        normal.z /= normalLength;
+    }
 
-                // Normalize again after transformation
-                normalLength = sqrtf(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
-                if (normalLength > 1e-6f) {
-                    normal.x /= normalLength;
-                    normal.y /= normalLength;
-                    normal.z /= normalLength;
-                }
+    float weightUpdate = 1.0f;
+    VoxelData* voxel = &block[voxelIdx];
+    float oldSDF = voxel->sdf;
+    float oldWeight = voxel->weight;
+    float newWeight = oldWeight + weightUpdate;
 
-                // Weighted average update (like expert code)
-                float weightUpdate = 1.0f; // Simple weight for now
-                VoxelData* voxel = &block[voxelIdx];
-                float oldSDF = voxel->sdf;
-                float oldWeight = voxel->weight;
-                float newWeight = oldWeight + weightUpdate;
+    if (newWeight > 0.0f) {
+        voxel->sdf = (oldSDF * oldWeight + sdfValue * weightUpdate) / newWeight;
+        voxel->weight = (uchar)fminf(255.0f, newWeight);
 
-                if (newWeight > 0.0f) {
-                    // Update SDF
-                    voxel->sdf = (oldSDF * oldWeight + sdfValue * weightUpdate) / newWeight;
-                    voxel->weight = (uchar)fminf(255.0f, newWeight);
+        float3 oldColor = make_float3(voxel->color.x, voxel->color.y, voxel->color.z);
+        float3 newColor = make_float3(
+            (oldColor.x * oldWeight + color.x * weightUpdate) / newWeight,
+            (oldColor.y * oldWeight + color.y * weightUpdate) / newWeight,
+            (oldColor.z * oldWeight + color.z * weightUpdate) / newWeight
+        );
+        voxel->color = make_uchar3(
+            (unsigned char)newColor.x,
+            (unsigned char)newColor.y,
+            (unsigned char)newColor.z
+        );
 
-                    // Update color (weighted average)
-                    float3 oldColor = make_float3(voxel->color.x, voxel->color.y, voxel->color.z);
-                    float3 newColor = make_float3(
-                        (oldColor.x * oldWeight + color.x * weightUpdate) / newWeight,
-                        (oldColor.y * oldWeight + color.y * weightUpdate) / newWeight,
-                        (oldColor.z * oldWeight + color.z * weightUpdate) / newWeight
-                    );
-                    voxel->color = make_uchar3(
-                        (unsigned char)newColor.x,
-                        (unsigned char)newColor.y,
-                        (unsigned char)newColor.z
-                    );
+        voxel->isUpdated = 1;
 
-                    // Note: VoxelData doesn't have normal field, skipping normal update
-                    // In real implementation, you might want to add normal field to VoxelData
-
-                    // Mark as updated
-                    voxel->isUpdated = 1;
-
-                    // Check for zero crossing (surface detection)
-                    if ((oldSDF > 0.0f && voxel->sdf <= 0.0f) ||
-                        (oldSDF <= 0.0f && voxel->sdf > 0.0f)) {
-                        voxel->isZeroCrossing = 1;
-                    }
-                }
-            }
+        if ((oldSDF > 0.0f && voxel->sdf <= 0.0f) ||
+            (oldSDF <= 0.0f && voxel->sdf > 0.0f)) {
+            voxel->isZeroCrossing = 1;
         }
     }
 
@@ -1304,6 +1434,8 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
         hashData.d_heap,
         hashData.d_heapCounter,
         hashData.d_hashBucketMutex,
+        hashData.d_blockParentUV,
+        hashData.d_blockAllocationMethod,
         depthmap,
         width,
         height,
@@ -1437,6 +1569,8 @@ extern "C" void allocBlocksFromDepthMapMethod2CUDA(
         hashData.d_heap,
         hashData.d_heapCounter,
         hashData.d_hashBucketMutex,
+        hashData.d_blockParentUV,
+        hashData.d_blockAllocationMethod,
         depthmap,
         normalmap,
         width,
@@ -1491,15 +1625,46 @@ extern "C" void allocBlocksFromDepthMapCUDA(
     CUDAHashRef & hashData,
     const Params & params,
     const float3 * depthmap,
+    const float3 * normalmap,
     int width,
     int height,
     float truncationDistance,
     float3 cameraPos,
     float* cameraTransform
 ) {
-    // Call Method 1 for backward compatibility
+
+#ifndef USE_NORMAL_DIR_ALLOC
+
+    // Method 1: Camera-direction allocation
     allocBlocksFromDepthMapMethod1CUDA(hashData, params, depthmap, width, height,
         truncationDistance, cameraPos, cameraTransform);
+
+
+
+#else
+
+    // Method 2: Normal-direction allocation (if normal map available)
+    if (normalmap != nullptr) {
+        allocBlocksFromDepthMapMethod2CUDA(
+            hashData,
+            params,
+            depthmap,
+            normalmap,
+            width,
+            height,
+            truncationDistance,
+            cameraPos,
+            cameraTransform
+        );
+    }
+    else {
+        printf("allocBlocksFromDepthMapCUDA: Skipping Method 2 (normalmap is nullptr)\n");
+    }
+
+
+
+#endif // !#define USE_NORMAL_DIR_ALLOC
+
 }
 
 /**
@@ -1553,6 +1718,8 @@ extern "C" void integrateDepthMapIntoBlocksCUDA(
     integrateDepthMapIntoBlocksKernel<<<gridSize, blockSize>>>(
         hashData.d_CompactifiedHashTable,
         hashData.d_SDFBlocks,
+        hashData.d_blockParentUV,
+        hashData.d_blockAllocationMethod,
         depthmap,
         colormap,
         normalmap,

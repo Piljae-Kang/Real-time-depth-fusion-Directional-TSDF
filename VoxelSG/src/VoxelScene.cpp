@@ -165,6 +165,7 @@ void VoxelScene::writeGlobalParametersLog() const {
     out << "timestamp: " << std::put_time(&localTm, "%Y-%m-%d %H:%M:%S") << std::endl;
     out << "output_directory: " << m_outputDirectory << std::endl;
     out << "folder_name: " << fs::path(m_outputDirectory).filename().string() << std::endl;
+    out << "Data_name: " << gpc.g_data_name << std::endl;
 
     out << "\n[Params]" << std::endl;
     out << "SDFBlockSize: " << m_params.SDFBlockSize << std::endl;
@@ -207,6 +208,8 @@ void VoxelScene::deallocate() {
     if (m_hashData.d_CompactifiedHashTable) CUDA_CHECK(cudaFree(m_hashData.d_CompactifiedHashTable));
     if (m_hashData.d_hashCompactifiedCounter) CUDA_CHECK(cudaFree(m_hashData.d_hashCompactifiedCounter));
     if (m_hashData.d_SDFBlocks) CUDA_CHECK(cudaFree(m_hashData.d_SDFBlocks));
+    if (m_hashData.d_blockParentUV) CUDA_CHECK(cudaFree(m_hashData.d_blockParentUV));
+    if (m_hashData.d_blockAllocationMethod) CUDA_CHECK(cudaFree(m_hashData.d_blockAllocationMethod));
     if (m_hashData.d_hashBucketMutex) CUDA_CHECK(cudaFree(m_hashData.d_hashBucketMutex));
     if (m_hashData.d_hashDecision) CUDA_CHECK(cudaFree(m_hashData.d_hashDecision));
     if (m_hashData.d_hashDecisionPrefix) CUDA_CHECK(cudaFree(m_hashData.d_hashDecisionPrefix));
@@ -219,6 +222,8 @@ void VoxelScene::deallocate() {
     m_hashData.d_CompactifiedHashTable = nullptr;
     m_hashData.d_hashCompactifiedCounter = nullptr;
     m_hashData.d_SDFBlocks = nullptr;
+    m_hashData.d_blockParentUV = nullptr;
+    m_hashData.d_blockAllocationMethod = nullptr;
     m_hashData.d_hashBucketMutex = nullptr;
     m_hashData.d_hashDecision = nullptr;
     m_hashData.d_hashDecisionPrefix = nullptr;
@@ -241,6 +246,15 @@ void VoxelScene::reset() {
 
     // Call CUDA kernel (defined in CUDAHashRef.cu)
     resetHashDataCUDA(m_hashData, m_params);
+
+    if (m_hashData.d_blockParentUV && m_params.SDFBlockNum > 0) {
+        size_t parentBytes = static_cast<size_t>(m_params.SDFBlockNum) * sizeof(int2);
+        CUDA_CHECK(cudaMemset(m_hashData.d_blockParentUV, 0xFF, parentBytes));
+    }
+    if (m_hashData.d_blockAllocationMethod && m_params.SDFBlockNum > 0) {
+        size_t methodBytes = static_cast<size_t>(m_params.SDFBlockNum) * sizeof(unsigned char);
+        CUDA_CHECK(cudaMemset(m_hashData.d_blockAllocationMethod, 0, methodBytes));
+    }
 
     // GPU synchronization
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -429,6 +443,7 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
         m_hashData,
         m_params,
         depthmap,
+        normalmap,
         width,
         height,
         truncationDistance,
