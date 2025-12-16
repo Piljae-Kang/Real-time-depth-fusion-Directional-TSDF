@@ -8,6 +8,9 @@
  */
 struct Params {
 
+	// Default constructor (required for some containers)
+	Params() = default;
+
 	Params(GlobalParamsConfig gpc) {
 		
 		SDFBlockNum = gpc.g_hashNumSDFBlocks;

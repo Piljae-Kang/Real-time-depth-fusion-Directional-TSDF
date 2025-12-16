@@ -11,13 +11,16 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <CudaCompile Include="src\CUDAChunkRef.cu" />
     <CudaCompile Include="src\CUDADepthMapData.cu" />
     <CudaCompile Include="src\CUDAHashRef.cu" />
     <CudaCompile Include="src\IntegrationKernel.cu" />
     <CudaCompile Include="src\RayCastRender.cu" />
     <CudaCompile Include="src\VoxelScene.cu" />
+    <CudaCompile Include="src\VoxelStreamingManager.cu" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\CUDAChunkRef.cpp" />
     <ClCompile Include="src\scanData2.cpp" />
     <ClCompile Include="src\CustomDepthMapGenerator.cpp" />
     <ClCompile Include="src\globalParamasConfig.cpp" />
@@ -25,10 +28,13 @@
     <ClCompile Include="src\scanData.cpp" />
     <ClCompile Include="src\VoxelScene.cpp" />
     <ClCompile Include="src\voxelSG.cpp" />
+    <ClCompile Include="src\VoxelStreamingManager.cpp" />
     <ClCompile Include="src\VoxelVisualizer.cpp" />
     <ClCompile Include="src\CUDADepthMapData.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\BitArray.h" />
+    <ClInclude Include="include\CUDAChunkRef.h" />
     <ClInclude Include="include\CUDADepthMapData.h" />
     <ClInclude Include="include\CUDAHashData.h" />
     <ClInclude Include="include\CUDAHashRef.h" />
@@ -40,6 +46,7 @@
     <ClInclude Include="include\scanData.h" />
     <ClInclude Include="include\utils.h" />
     <ClInclude Include="include\VoxelScene.h" />
+    <ClInclude Include="include\VoxelStreamingManager.h" />
     <ClInclude Include="include\VoxelVisualizer.h" />
     <ClInclude Include="include\scanData2.h" />
   </ItemGroup>

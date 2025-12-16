@@ -25,8 +25,8 @@ void GlobalParamsConfig::setDefault() {
     // g_SDFVoxelSize = 0.004f;
     //g_SDFVoxelSize = 0.05f;
     // g_SDFVoxelSize = 0.01f;
-    //g_SDFVoxelSize = 0.1f;
-    g_SDFVoxelSize = 0.05f;
+    g_SDFVoxelSize = 0.1f;
+    // g_SDFVoxelSize = 0.05f;
     
     // SDF marching cubes threshold factor: Threshold factor for triangle generation in Marching Cubes algorithm
     g_SDFMarchingCubeThreshFactor = 10.0f;
@@ -35,8 +35,8 @@ void GlobalParamsConfig::setDefault() {
     //g_SDFTruncation = 0.08f;
     //g_SDFTruncation = 0.5f;
     // g_SDFTruncation = 0.05f;
-    // g_SDFTruncation = 0.25f;
-    g_SDFTruncation = 0.15f;
+    g_SDFTruncation = 0.25f;
+    // g_SDFTruncation = 0.15f;
 
     
     // SDF truncation scale: Weighted scale factor for truncation (meters)

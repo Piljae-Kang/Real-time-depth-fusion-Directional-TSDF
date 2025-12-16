@@ -20,24 +20,26 @@ extern "C" void integrateDepthMapCUDA(CUDAHashRef & hashData, const Params & par
 
 // New depthmap-based voxel allocation kernels (3-step process)
 // Method 1: Camera direction allocation
-extern "C" void allocBlocksFromDepthMapMethod1CUDA(CUDAHashRef & hashData, const Params & params,
+extern "C" float allocBlocksFromDepthMapMethod1CUDA(CUDAHashRef & hashData, const Params & params,
     const float3* depthmap, int width, int height, float truncationDistance,
     float3 cameraPos, float* cameraTransform);
 
 // Method 2: Normal direction allocation (for inside surface)
-extern "C" void allocBlocksFromDepthMapMethod2CUDA(CUDAHashRef & hashData, const Params & params,
+extern "C" float allocBlocksFromDepthMapMethod2CUDA(CUDAHashRef & hashData, const Params & params,
     const float3* depthmap, const float3* normalmap, int width, int height, float truncationDistance,
     float3 cameraPos, float* cameraTransform);
 
 // Legacy function (calls Method 1 for backward compatibility)
-extern "C" void allocBlocksFromDepthMapCUDA(CUDAHashRef & hashData, const Params & params,
+extern "C" float allocBlocksFromDepthMapCUDA(CUDAHashRef & hashData, const Params & params,
     const float3* depthmap, const float3* normalmap, int width, int height, float truncationDistance,
     float3 cameraPos, float* cameraTransform);
-extern "C" void integrateDepthMapIntoBlocksCUDA(CUDAHashRef & hashData, const Params & params,
+extern "C" float integrateDepthMapIntoBlocksCUDA(CUDAHashRef & hashData, const Params & params,
     const float3* depthmap, const uchar3* colormap, const float3* normalmap,
     int width, int height, float truncationDistance, float3 cameraPos, float* cameraTransform,
     float fx, float fy, float cx, float cy);
-extern "C" void compactifyHashCUDA(CUDAHashRef & hashData, const Params & params);
+extern "C" float compactifyHashCUDA(CUDAHashRef & hashData, const Params & params);
+
+extern "C" void resetHasMutexCUDA(CUDAHashRef & hashData, const Params & hashParams);
 
 /**
  * VoxelScene: Main class for GPU-based Voxel Hashing and 3D Reconstruction

@@ -437,9 +437,17 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
     std::cout << "  m_hashData.d_heapCounter: " << (void*)m_hashData.d_heapCounter << std::endl;
     std::cout << "  d_transform: " << (void*)d_transform << std::endl;
     
+    // ===================================================================
+    // Kernel Timing Measurement (kernel execution time only)
+    // ===================================================================
+    float totalKernelTime = 0.0f;
+    float allocTime = 0.0f;
+    float compactTime = 0.0f;
+    float integrateTime = 0.0f;
+    
     // Step 1: Allocate blocks based on depthmap
     std::cout << "  Step 1: Allocating blocks..." << std::endl;
-    allocBlocksFromDepthMapCUDA(
+    allocTime = allocBlocksFromDepthMapCUDA(
         m_hashData,
         m_params,
         depthmap,
@@ -450,14 +458,16 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
         cameraPos,
         d_transform
     );
+    totalKernelTime += allocTime;
     
     // Step 2: Compactify hash entries (optional, for efficiency)
     std::cout << "  Step 2: Compactifying hash entries..." << std::endl;
-    compactifyHashCUDA(m_hashData, m_params);
+    compactTime = compactifyHashCUDA(m_hashData, m_params);
+    totalKernelTime += compactTime;
     
     // Step 3: Integrate depth map into allocated blocks
     std::cout << "  Step 3: Integrating depth map..." << std::endl;
-    integrateDepthMapIntoBlocksCUDA(
+    integrateTime = integrateDepthMapIntoBlocksCUDA(
         m_hashData,
         m_params,
         depthmap,
@@ -470,11 +480,56 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
         d_transform,
         fx, fy, cx, cy
     );
+    totalKernelTime += integrateTime;
+    
+    // Print kernel timing summary
+    std::cout << "\n=== Kernel Execution Time Summary ===" << std::endl;
+    std::cout << "  1. Voxel Allocation:      " << std::fixed << std::setprecision(3) << allocTime << " ms" << std::endl;
+    std::cout << "  2. Hash Compactification: " << std::fixed << std::setprecision(3) << compactTime << " ms" << std::endl;
+    std::cout << "  3. Voxelwise Integration:  " << std::fixed << std::setprecision(3) << integrateTime << " ms" << std::endl;
+    std::cout << "  Total Kernel Time:         " << std::fixed << std::setprecision(3) << totalKernelTime << " ms" << std::endl;
+    std::cout << "=====================================\n" << std::endl;
     
     // Get active block count from compactified counter
     int numActiveBlocks = 0;
     cudaMemcpy(&numActiveBlocks, m_hashData.d_hashCompactifiedCounter, sizeof(int), cudaMemcpyDeviceToHost);
+    
+    // Calculate active voxel count and memory usage
+    const int voxelsPerBlock = SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE; // 8^3 = 512
+    int numActiveVoxels = numActiveBlocks * voxelsPerBlock;
+    size_t activeVoxelDataBytes = static_cast<size_t>(numActiveVoxels) * sizeof(VoxelData);
+    
+    // Print memory statistics
+    std::cout << "\n=== Active Voxel Memory Statistics ===" << std::endl;
     std::cout << "  Active blocks: " << numActiveBlocks << std::endl;
+    std::cout << "  Active voxels: " << numActiveVoxels 
+              << " (blocks × " << voxelsPerBlock << " voxels/block)" << std::endl;
+    std::cout << "  Active voxel data memory: " 
+              << std::fixed << std::setprecision(2) 
+              << (activeVoxelDataBytes / (1024.0 * 1024.0)) << " MB"
+              << " (" << activeVoxelDataBytes << " bytes)" << std::endl;
+    
+    // Calculate total allocated blocks for comparison
+    unsigned int heapCounter = 0;
+    cudaMemcpy(&heapCounter, m_hashData.d_heapCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+    unsigned int initialHeapCounter = m_params.SDFBlockNum - 1;
+    unsigned int totalAllocatedBlocks = initialHeapCounter - heapCounter;
+    
+    if (totalAllocatedBlocks > 0) {
+        int totalAllocatedVoxels = totalAllocatedBlocks * voxelsPerBlock;
+        size_t totalAllocatedVoxelDataBytes = static_cast<size_t>(totalAllocatedVoxels) * sizeof(VoxelData);
+        float activeRatio = (float)numActiveBlocks / totalAllocatedBlocks * 100.0f;
+        
+        std::cout << "  Total allocated blocks: " << totalAllocatedBlocks << std::endl;
+        std::cout << "  Total allocated voxels: " << totalAllocatedVoxels << std::endl;
+        std::cout << "  Total allocated voxel data memory: "
+                  << std::fixed << std::setprecision(2)
+                  << (totalAllocatedVoxelDataBytes / (1024.0 * 1024.0)) << " MB"
+                  << " (" << totalAllocatedVoxelDataBytes << " bytes)" << std::endl;
+        std::cout << "  Active / Allocated ratio: " 
+                  << std::fixed << std::setprecision(1) << activeRatio << "%" << std::endl;
+    }
+    std::cout << "=====================================\n" << std::endl;
 
 
     

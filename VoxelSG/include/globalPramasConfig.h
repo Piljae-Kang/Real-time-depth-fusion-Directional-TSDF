@@ -2,6 +2,7 @@
 #pragma once
 #include <string>
 #include <iostream>
+#include "utils.h"
 
 // #define SDF_BLOCK_SIZE 8
 #define SDF_BLOCK_SIZE 8
@@ -11,12 +12,34 @@ struct vec3f {
     float x, y, z;
     vec3f() : x(0), y(0), z(0) {}
     vec3f(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+    
+    vec3f operator+(const vec3f& other) const {
+        return vec3f(x + other.x, y + other.y, z + other.z);
+    }
+    
+    vec3f operator-(const vec3f& other) const {
+        return vec3f(x - other.x, y - other.y, z - other.z);
+    }
 };
 
 struct vec3i {
     int x, y, z;
     vec3i() : x(0), y(0), z(0) {}
     vec3i(int x_, int y_, int z_) : x(x_), y(y_), z(z_) {}
+    
+    vec3i operator+(const vec3i& other) const {
+        return vec3i(x + other.x, y + other.y, z + other.z);
+    }
+    
+    vec3i operator-(const vec3i& other) const {
+        return vec3i(x - other.x, y - other.y, z - other.z);
+    }
+};
+
+struct vec3ui {
+    uint x, y, z;
+    vec3ui() : x(0), y(0), z(0) {}
+    vec3ui(uint x_, uint y_, uint z_) : x(x_), y(y_), z(z_) {}
 };
 
 struct vec4f {

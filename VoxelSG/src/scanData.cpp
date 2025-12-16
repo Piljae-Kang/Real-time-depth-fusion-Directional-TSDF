@@ -6,7 +6,9 @@ namespace fs = std::filesystem;
 
 ScanDataLoader::ScanDataLoader(const std::string& path) : rootPath(path) {
     
-    frame_idx = 200;
+    // frame_idx = 200;
+    // frame_idx = 400;
+    frame_idx = 1000;
     //width = 400;
     //height = 480;
 

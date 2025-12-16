@@ -15,6 +15,8 @@
 #define MAX_BUCKET_SPIN    128
 #define MAX_BUCKET_RETRY     4
 
+#define T_PER_BLOCK 8
+
 // ----------------------------------------------------------------------------
 // Host-side debugging helpers
 // ----------------------------------------------------------------------------
@@ -56,7 +58,7 @@ static float computeKernelElapsedMs(cudaEvent_t startEvent, cudaEvent_t stopEven
  * Hash function for block coordinates (like expert code)
  * Computes hash value for a 3D block coordinate
  */
-__device__ unsigned int hashBlockCoordinate(int3 blockCoord, int numBuckets) {
+__device__ __forceinline__ unsigned int hashBlockCoordinate(int3 blockCoord, int numBuckets) {
     // Simple hash function - in real implementation you might want a better one
     unsigned int hash = (blockCoord.x * 73856093) ^
         (blockCoord.y * 19349663) ^
@@ -96,7 +98,7 @@ __device__ int3 worldToSDFBlock(const float3& worldPos, float voxelSize) {
 /**
  * Convert SDF block coordinates to world position
  */
-__device__ float3 SDFBlockToWorld(const int3& sdfBlock, float voxelSize) {
+__device__ __forceinline__ float3 SDFBlockToWorld(const int3& sdfBlock, float voxelSize) {
     return make_float3(
         sdfBlock.x * SDF_BLOCK_SIZE * voxelSize,
         sdfBlock.y * SDF_BLOCK_SIZE * voxelSize,
@@ -217,7 +219,7 @@ __device__ int allocBlock(HashSlot* d_hashTable,
             if (targetSlot->pos.x == blockCoord.x &&
                 targetSlot->pos.y == blockCoord.y &&
                 targetSlot->pos.z == blockCoord.z) {
-                if (debug) printf("    -> Block already allocated at slot %d after locking\n", firstEmpty);
+                // if (debug) printf("    -> Block already allocated at slot %d after locking\n", firstEmpty);
                 d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
                 return currentPtr;
             }
@@ -235,30 +237,30 @@ __device__ int allocBlock(HashSlot* d_hashTable,
             targetSlot->ptr = static_cast<int>(blockIndex);
             __threadfence();
 
-            if (debug) {
-                printf("    -> Allocated block #%u from heap[%u] at slot %d, coord=(%d,%d,%d)\n",
-                       blockIndex, heapIndex, firstEmpty,
-                       blockCoord.x, blockCoord.y, blockCoord.z);
-            }
+            // if (debug) {
+            //     printf("    -> Allocated block #%u from heap[%u] at slot %d, coord=(%d,%d,%d)\n",
+            //            blockIndex, heapIndex, firstEmpty,
+            //            blockCoord.x, blockCoord.y, blockCoord.z);
+            // }
 
             d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
             return static_cast<int>(blockIndex);
         } else {
             // Out of memory - restore counter and release lock
             atomicAdd((unsigned int*)d_heapCounter, 1);
-            if (debug) {
-                printf("    -> Out of memory! heapIndex=%u (must be > 0 and < %d)\n",
-                       heapIndex, SDFBlockNum);
-            }
+            // if (debug) {
+            //     printf("    -> Out of memory! heapIndex=%u (must be > 0 and < %d)\n",
+            //            heapIndex, SDFBlockNum);
+            // }
             d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
             return -1;
         }
     }
 
-    if (debug) {
-        printf("    -> Failed to acquire bucket lock after %d retries for coord=(%d,%d,%d)\n",
-               MAX_BUCKET_RETRY, blockCoord.x, blockCoord.y, blockCoord.z);
-    }
+    // if (debug) {
+    //     printf("    -> Failed to acquire bucket lock after %d retries for coord=(%d,%d,%d)\n",
+    //            MAX_BUCKET_RETRY, blockCoord.x, blockCoord.y, blockCoord.z);
+    // }
 
     return -1;
 }
@@ -411,14 +413,14 @@ __device__ void allocateBlocksAlongRay(
     // pixelIdx is the linear index (y * width + x)
     bool shouldDebug = (parentPixelIdx == 186748);
 
-    if (shouldDebug) {
-        printf("[Pixel %d] Ray traversal: pixel(%d,%d), rayStart(%.3f,%.3f,%.3f) -> rayEnd(%.3f,%.3f,%.3f)\n",
-            parentPixelIdx, parentPixelX, parentPixelY, rayStart.x, rayStart.y, rayStart.z, rayEnd.x, rayEnd.y, rayEnd.z);
-        printf("  Block coords: start(%d,%d,%d) -> end(%d,%d,%d), rayDir(%.3f,%.3f,%.3f)\n",
-            idCurrentVoxel.x, idCurrentVoxel.y, idCurrentVoxel.z,
-            idEnd.x, idEnd.y, idEnd.z,
-            rayDir.x, rayDir.y, rayDir.z);
-    }
+    // if (shouldDebug) {
+    //     printf("[Pixel %d] Ray traversal: pixel(%d,%d), rayStart(%.3f,%.3f,%.3f) -> rayEnd(%.3f,%.3f,%.3f)\n",
+    //         parentPixelIdx, parentPixelX, parentPixelY, rayStart.x, rayStart.y, rayStart.z, rayEnd.x, rayEnd.y, rayEnd.z);
+    //     printf("  Block coords: start(%d,%d,%d) -> end(%d,%d,%d), rayDir(%.3f,%.3f,%.3f)\n",
+    //         idCurrentVoxel.x, idCurrentVoxel.y, idCurrentVoxel.z,
+    //         idEnd.x, idEnd.y, idEnd.z,
+    //         rayDir.x, rayDir.y, rayDir.z);
+    // }
 
     // 3D DDA traversal - walk along the ray efficiently
     int maxIterations = 1024; // Safety limit
@@ -426,17 +428,17 @@ __device__ void allocateBlocksAlongRay(
         // Allocate current block
         int3 blockCoord = idCurrentVoxel;
         
-        if (shouldDebug && iter < 10) {
-            currentWorldPos = SDFBlockToWorld(blockCoord, voxelSize);
-            printf("  [Iter %d] Block(%d,%d,%d) World(%.3f,%.3f,%.3f)\n",
-                   iter, blockCoord.x, blockCoord.y, blockCoord.z,
-                   currentWorldPos.x, currentWorldPos.y, currentWorldPos.z);
-        }
+        // if (shouldDebug && iter < 10) {
+        //     currentWorldPos = SDFBlockToWorld(blockCoord, voxelSize);
+        //     printf("  [Iter %d] Block(%d,%d,%d) World(%.3f,%.3f,%.3f)\n",
+        //            iter, blockCoord.x, blockCoord.y, blockCoord.z,
+        //            currentWorldPos.x, currentWorldPos.y, currentWorldPos.z);
+        // }
         
         // Allocate current block (using helper function, like expert code)
-        if (shouldDebug) {
-            printf("  Before allocBlock: iter=%d, blockCoord=(%d,%d,%d)\n", iter, blockCoord.x, blockCoord.y, blockCoord.z);
-        }
+        // if (shouldDebug) {
+        //     printf("  Before allocBlock: iter=%d, blockCoord=(%d,%d,%d)\n", iter, blockCoord.x, blockCoord.y, blockCoord.z);
+        // }
         int blockPtr = allocBlockWithMeta(d_hashTable,
                    d_heap,
                    d_heapCounter,
@@ -458,9 +460,9 @@ __device__ void allocateBlocksAlongRay(
         
         // Check if we've reached the end
         if (idCurrentVoxel.x == idEnd.x && idCurrentVoxel.y == idEnd.y && idCurrentVoxel.z == idEnd.z) {
-            if (shouldDebug) {
-                printf("  Reached end at iter %d\n", iter);
-            }
+            // if (shouldDebug) {
+            //     printf("  Reached end at iter %d\n", iter);
+            // }
             break;
         }
 
@@ -1146,6 +1148,18 @@ __global__ void integrateDepthMapIntoBlocksKernel(
     //    //}
 
     //}
+
+}
+
+
+__global__ void resetHashMutexKernel(CUDAHashRef hashData, int numBlocks) {
+
+    const unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < numBlocks) {
+        hashData.d_hashBucketMutex[idx] = HASH_BUCKET_UNLOCKED;
+    }
+
 }
 
 // ============================================================================
@@ -1263,10 +1277,10 @@ __global__ void compactifyHashKernel(
             d_CompactifiedHashTable[compactIdx] = slot;
             
             // Debug: Print first few active blocks
-            if (compactIdx < 10) {
-                printf("Active block #%d: coord=(%d,%d,%d), ptr=%d, hashSlotIdx=%d\n",
-                       compactIdx, slot.pos.x, slot.pos.y, slot.pos.z, slot.ptr, idx);
-            }
+            // if (compactIdx < 10) {
+            //     printf("Active block #%d: coord=(%d,%d,%d), ptr=%d, hashSlotIdx=%d\n",
+            //            compactIdx, slot.pos.x, slot.pos.y, slot.pos.z, slot.ptr, idx);
+            // }
         }
     }
 }
@@ -1275,9 +1289,9 @@ __global__ void compactifyHashKernel(
  * Compactify hash entries (like expert code)
  * Removes empty slots and creates a contiguous array of active blocks
  */
-extern "C" void compactifyHashCUDA(CUDAHashRef & hashData, const Params & params) {
-    printf("compactifyHashCUDA: Starting hash compaction...\n");
-    printf("  Total slots: %d\n", params.totalHashSize);
+extern "C" float compactifyHashCUDA(CUDAHashRef & hashData, const Params & params) {
+    // printf("compactifyHashCUDA: Starting hash compaction...\n");
+    // printf("  Total slots: %d\n", params.totalHashSize);
 
     // Reset compactified counter
     cudaMemset(hashData.d_hashCompactifiedCounter, 0, sizeof(int));
@@ -1287,7 +1301,7 @@ extern "C" void compactifyHashCUDA(CUDAHashRef & hashData, const Params & params
     const dim3 gridSize((params.totalHashSize + threadsPerBlock - 1) / threadsPerBlock, 1);
     const dim3 blockSize(threadsPerBlock, 1);
 
-    printf("  Grid size: %d, Block size: %d\n", gridSize.x, blockSize.x);
+    // printf("  Grid size: %d, Block size: %d\n", gridSize.x, blockSize.x);
 
     printGpuMemoryUsage("Before compactifyHash kernel");
 
@@ -1311,7 +1325,7 @@ extern "C" void compactifyHashCUDA(CUDAHashRef & hashData, const Params & params
         printf("  ERROR: CUDA compactification kernel launch failed: %s\n", cudaGetErrorString(launchErr));
         cudaEventDestroy(startEvent);
         cudaEventDestroy(stopEvent);
-        return;
+        return 0.0f;
     }
 
     cudaError_t eventSyncErr = cudaEventSynchronize(stopEvent);
@@ -1319,7 +1333,7 @@ extern "C" void compactifyHashCUDA(CUDAHashRef & hashData, const Params & params
         printf("  ERROR: CUDA compactification event sync failed: %s\n", cudaGetErrorString(eventSyncErr));
         cudaEventDestroy(startEvent);
         cudaEventDestroy(stopEvent);
-        return;
+        return 0.0f;
     }
 
     float kernelElapsedMs = computeKernelElapsedMs(startEvent, stopEvent);
@@ -1332,7 +1346,7 @@ extern "C" void compactifyHashCUDA(CUDAHashRef & hashData, const Params & params
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         printf("CUDA compactification kernel error: %s\n", cudaGetErrorString(err));
-        return;
+        return 0.0f;
     }
 
     // Get number of compactified entries
@@ -1355,22 +1369,24 @@ extern "C" void compactifyHashCUDA(CUDAHashRef & hashData, const Params & params
         allocatedBlocksUsagePercent = (float)numCompactified / totalAllocatedBlocks * 100.0f;
     }
 
-    printf("compactifyHashCUDA: Compaction completed!\n");
-    printf("  Kernel execution time: %.3f ms\n", kernelElapsedMs);
-    printf("  Active blocks: %d\n", numCompactified);
-    printf("  Total allocated blocks: %u (max: %d, used: %.1f%%)\n",
-        totalAllocatedBlocks, params.SDFBlockNum,
-        totalAllocatedBlocks > 0 ? (float)totalAllocatedBlocks / params.SDFBlockNum * 100.0f : 0.0f);
-    printf("  Active / Allocated: %d / %u (%.1f%%)\n",
-        numCompactified, totalAllocatedBlocks, allocatedBlocksUsagePercent);
-    printf("  Hash table usage: %d / %d (%.1f%%)\n",
-        numCompactified, params.totalHashSize, hashTableUsagePercent);
+    // printf("compactifyHashCUDA: Compaction completed!\n");
+    // printf("  Kernel execution time: %.3f ms\n", kernelElapsedMs);
+    // printf("  Active blocks: %d\n", numCompactified);
+    // printf("  Total allocated blocks: %u (max: %d, used: %.1f%%)\n",
+    //     totalAllocatedBlocks, params.SDFBlockNum,
+    //     totalAllocatedBlocks > 0 ? (float)totalAllocatedBlocks / params.SDFBlockNum * 100.0f : 0.0f);
+    // printf("  Active / Allocated: %d / %u (%.1f%%)\n",
+    //     numCompactified, totalAllocatedBlocks, allocatedBlocksUsagePercent);
+    // printf("  Hash table usage: %d / %d (%.1f%%)\n",
+    //     numCompactified, params.totalHashSize, hashTableUsagePercent);
+    
+    return kernelElapsedMs;
 }
 
 /**
  * Allocate blocks for depthmap-based integration
  */
-extern "C" void allocBlocksFromDepthMapMethod1CUDA(
+extern "C" float allocBlocksFromDepthMapMethod1CUDA(
     CUDAHashRef & hashData,
     const Params & params,
     const float3 * depthmap,
@@ -1380,13 +1396,13 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
     float3 cameraPos,
     float* cameraTransform
 ) {
-    printf("allocBlocksFromDepthMapCUDA: Starting block allocation...\n");
-    printf("  Depth map size: %dx%d\n", width, height);
-    printf("  Truncation distance: %f\n", truncationDistance);
+    // printf("allocBlocksFromDepthMapCUDA: Starting block allocation...\n");
+    // printf("  Depth map size: %dx%d\n", width, height);
+    // printf("  Truncation distance: %f\n", truncationDistance);
 
     // Debug: Check pointers
-    printf("  Pointer check: depthmap=%p, d_hashTable=%p, d_heapCounter=%p, cameraTransform=%p\n",
-        depthmap, hashData.d_hashTable, hashData.d_heapCounter, cameraTransform);
+    // printf("  Pointer check: depthmap=%p, d_hashTable=%p, d_heapCounter=%p, cameraTransform=%p\n",
+    //     depthmap, hashData.d_hashTable, hashData.d_heapCounter, cameraTransform);
 
     // Set up grid and block dimensions for depthmap pixels
     // gridSize.x covers width, gridSize.y covers height
@@ -1396,10 +1412,10 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
         (height + blockSize.y - 1) / blockSize.y
     );
 
-    printf("  Grid size: (%d, %d), Block size: (%d, %d)\n",
-        gridSize.x, gridSize.y, blockSize.x, blockSize.y);
-    printf("  Launching kernel with %d threads total (width=%d, height=%d)\n",
-        gridSize.x * gridSize.y * blockSize.x * blockSize.y, width, height);
+    // printf("  Grid size: (%d, %d), Block size: (%d, %d)\n",
+    //     gridSize.x, gridSize.y, blockSize.x, blockSize.y);
+    // printf("  Launching kernel with %d threads total (width=%d, height=%d)\n",
+    //     gridSize.x * gridSize.y * blockSize.x * blockSize.y, width, height);
 
     // Check for CUDA errors before kernel launch
     cudaError_t preErr = cudaGetLastError();
@@ -1459,7 +1475,7 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
         cudaFree(d_validPixelCounter);
         cudaEventDestroy(startEvent);
         cudaEventDestroy(stopEvent);
-        return;
+        return 0.0f;
     }
 
     cudaError_t eventSyncErr = cudaEventSynchronize(stopEvent);
@@ -1468,7 +1484,7 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
         cudaFree(d_validPixelCounter);
         cudaEventDestroy(startEvent);
         cudaEventDestroy(stopEvent);
-        return;
+        return 0.0f;
     }
 
     float kernelElapsedMs = computeKernelElapsedMs(startEvent, stopEvent);
@@ -1480,10 +1496,10 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
     if (err != cudaSuccess) {
         printf("  ERROR: CUDA kernel execution failed: %s\n", cudaGetErrorString(err));
         cudaFree(d_validPixelCounter);
-        return;
+        return 0.0f;
     }
     
-    printf("  Kernel execution completed successfully (%.3f ms)\n", kernelElapsedMs);
+    // printf("  Kernel execution completed successfully (%.3f ms)\n", kernelElapsedMs);
 
     // Read back valid pixel counter
     int numValidPixels = 0;
@@ -1509,13 +1525,13 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
     // Calculate total allocated blocks so far
     unsigned int totalAllocatedAfter = initialHeapCounter - heapCounterAfter;
     
-    printf("allocBlocksFromDepthMapMethod1CUDA: Block allocation completed!\n");
-    printf("  Valid pixels processed: %d\n", numValidPixels);
-    printf("  Heap counter: before=%u, after=%u\n", heapCounterBefore, heapCounterAfter);
-    printf("  NEWLY allocated blocks in this frame: %u\n", newlyAllocatedBlocks);
-    printf("  NEWLY allocated voxels in this frame: %u (blocks * %d)\n", newlyAllocatedBlocks * (SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE), SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE);
-    printf("  Total allocated blocks: %u (max: %d, used: %.1f%%)\n",
-        totalAllocatedAfter, params.SDFBlockNum, (float)totalAllocatedAfter / params.SDFBlockNum * 100.0f);
+    // printf("allocBlocksFromDepthMapMethod1CUDA: Block allocation completed!\n");
+    // printf("  Valid pixels processed: %d\n", numValidPixels);
+    // printf("  Heap counter: before=%u, after=%u\n", heapCounterBefore, heapCounterAfter);
+    // printf("  NEWLY allocated blocks in this frame: %u\n", newlyAllocatedBlocks);
+    // printf("  NEWLY allocated voxels in this frame: %u (blocks * %d)\n", newlyAllocatedBlocks * (SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE), SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE);
+    // printf("  Total allocated blocks: %u (max: %d, used: %.1f%%)\n",
+    //     totalAllocatedAfter, params.SDFBlockNum, (float)totalAllocatedAfter / params.SDFBlockNum * 100.0f);
 
     // Debug: Check if we're hitting memory limits
     if (heapCounterAfter == 0 || heapCounterAfter > initialHeapCounter) {
@@ -1527,12 +1543,14 @@ extern "C" void allocBlocksFromDepthMapMethod1CUDA(
     }
 
     printGpuMemoryUsage("After Method1 allocation");
+    
+    return kernelElapsedMs;
 }
 
 /**
  * Method 2: Allocate blocks using normal direction for inside surface
  */
-extern "C" void allocBlocksFromDepthMapMethod2CUDA(
+extern "C" float allocBlocksFromDepthMapMethod2CUDA(
     CUDAHashRef & hashData,
     const Params & params,
     const float3 * depthmap,
@@ -1543,9 +1561,9 @@ extern "C" void allocBlocksFromDepthMapMethod2CUDA(
     float3 cameraPos,
     float* cameraTransform
 ) {
-    printf("allocBlocksFromDepthMapMethod2CUDA: Starting normal direction allocation...\n");
-    printf("  Depth map size: %dx%d\n", width, height);
-    printf("  Truncation distance: %f\n", truncationDistance);
+    // printf("allocBlocksFromDepthMapMethod2CUDA: Starting normal direction allocation...\n");
+    // printf("  Depth map size: %dx%d\n", width, height);
+    // printf("  Truncation distance: %f\n", truncationDistance);
 
     // Set up grid and block dimensions for depthmap pixels
     const unsigned int threadsPerBlock = 256;
@@ -1553,7 +1571,7 @@ extern "C" void allocBlocksFromDepthMapMethod2CUDA(
     const dim3 gridSize((totalPixels + threadsPerBlock - 1) / threadsPerBlock, 1);
     const dim3 blockSize(threadsPerBlock, 1);
 
-    printf("  Grid size: %d, Block size: %d\n", gridSize.x, blockSize.x);
+    // printf("  Grid size: %d, Block size: %d\n", gridSize.x, blockSize.x);
 
     printGpuMemoryUsage("Before Method2 allocation");
 
@@ -1592,7 +1610,7 @@ extern "C" void allocBlocksFromDepthMapMethod2CUDA(
         printf("CUDA Method 2 allocation kernel launch error: %s\n", cudaGetErrorString(launchErr));
         cudaEventDestroy(startEvent);
         cudaEventDestroy(stopEvent);
-        return;
+        return 0.0f;
     }
 
     cudaError_t eventSyncErr = cudaEventSynchronize(stopEvent);
@@ -1600,7 +1618,7 @@ extern "C" void allocBlocksFromDepthMapMethod2CUDA(
         printf("CUDA Method 2 allocation event sync error: %s\n", cudaGetErrorString(eventSyncErr));
         cudaEventDestroy(startEvent);
         cudaEventDestroy(stopEvent);
-        return;
+        return 0.0f;
     }
 
     float kernelElapsedMs = computeKernelElapsedMs(startEvent, stopEvent);
@@ -1611,17 +1629,19 @@ extern "C" void allocBlocksFromDepthMapMethod2CUDA(
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         printf("CUDA Method 2 allocation kernel error: %s\n", cudaGetErrorString(err));
-        return;
+        return 0.0f;
     }
 
-    printf("allocBlocksFromDepthMapMethod2CUDA: Normal direction allocation completed! (%.3f ms)\n", kernelElapsedMs);
+    // printf("allocBlocksFromDepthMapMethod2CUDA: Normal direction allocation completed! (%.3f ms)\n", kernelElapsedMs);
     printGpuMemoryUsage("After Method2 allocation");
+    
+    return kernelElapsedMs;
 }
 
 /**
  * Legacy function for backward compatibility (calls Method 1)
  */
-extern "C" void allocBlocksFromDepthMapCUDA(
+extern "C" float allocBlocksFromDepthMapCUDA(
     CUDAHashRef & hashData,
     const Params & params,
     const float3 * depthmap,
@@ -1636,7 +1656,7 @@ extern "C" void allocBlocksFromDepthMapCUDA(
 #ifndef USE_NORMAL_DIR_ALLOC
 
     // Method 1: Camera-direction allocation
-    allocBlocksFromDepthMapMethod1CUDA(hashData, params, depthmap, width, height,
+    return allocBlocksFromDepthMapMethod1CUDA(hashData, params, depthmap, width, height,
         truncationDistance, cameraPos, cameraTransform);
 
 
@@ -1645,7 +1665,7 @@ extern "C" void allocBlocksFromDepthMapCUDA(
 
     // Method 2: Normal-direction allocation (if normal map available)
     if (normalmap != nullptr) {
-        allocBlocksFromDepthMapMethod2CUDA(
+        return allocBlocksFromDepthMapMethod2CUDA(
             hashData,
             params,
             depthmap,
@@ -1659,6 +1679,7 @@ extern "C" void allocBlocksFromDepthMapCUDA(
     }
     else {
         printf("allocBlocksFromDepthMapCUDA: Skipping Method 2 (normalmap is nullptr)\n");
+        return 0.0f;
     }
 
 
@@ -1670,7 +1691,7 @@ extern "C" void allocBlocksFromDepthMapCUDA(
 /**
  * Integrate depth map into allocated blocks (improved version)
  */
-extern "C" void integrateDepthMapIntoBlocksCUDA(
+extern "C" float integrateDepthMapIntoBlocksCUDA(
     CUDAHashRef & hashData,
     const Params & params,
     const float3 * depthmap,
@@ -1683,9 +1704,9 @@ extern "C" void integrateDepthMapIntoBlocksCUDA(
     float* cameraTransform,
     float fx, float fy, float cx, float cy
 ) {
-    printf("integrateDepthMapIntoBlocksCUDA: Starting improved integration...\n");
-    printf("  Depth map size: %dx%d\n", width, height);
-    printf("  Truncation distance: %f\n", truncationDistance);
+    // printf("integrateDepthMapIntoBlocksCUDA: Starting improved integration...\n");
+    // printf("  Depth map size: %dx%d\n", width, height);
+    // printf("  Truncation distance: %f\n", truncationDistance);
 
     // Get number of active blocks from compactification
     int numActiveBlocks = 0;
@@ -1694,7 +1715,7 @@ extern "C" void integrateDepthMapIntoBlocksCUDA(
 
     if (numActiveBlocks == 0) {
         printf("No active blocks found for integration!\n");
-        return;
+        return 0.0f;
     }
 
     // Set up grid and block dimensions (like expert code)
@@ -1703,8 +1724,8 @@ extern "C" void integrateDepthMapIntoBlocksCUDA(
     dim3 gridSize(numActiveBlocks, 1);
     dim3 blockSize(threadsPerBlock, 1);
 
-    printf("  Active blocks: %d\n", numActiveBlocks);
-    printf("  Grid size: %d, Block size: %d (%d threads per block)\n", gridSize.x, blockSize.x, threadsPerBlock);
+    // printf("  Active blocks: %d\n", numActiveBlocks);
+    // printf("  Grid size: %d, Block size: %d (%d threads per block)\n", gridSize.x, blockSize.x, threadsPerBlock);
 
     printGpuMemoryUsage("Before integrateDepthMapIntoBlocks kernel");
 
@@ -1740,7 +1761,7 @@ extern "C" void integrateDepthMapIntoBlocksCUDA(
         printf("CUDA integration kernel launch error: %s\n", cudaGetErrorString(launchErr));
         cudaEventDestroy(startEvent);
         cudaEventDestroy(stopEvent);
-        return;
+        return 0.0f;
     }
 
     cudaError_t eventSyncErr = cudaEventSynchronize(stopEvent);
@@ -1748,7 +1769,7 @@ extern "C" void integrateDepthMapIntoBlocksCUDA(
         printf("CUDA integration kernel event sync error: %s\n", cudaGetErrorString(eventSyncErr));
         cudaEventDestroy(startEvent);
         cudaEventDestroy(stopEvent);
-        return;
+        return 0.0f;
     }
 
     float kernelElapsedMs = computeKernelElapsedMs(startEvent, stopEvent);
@@ -1759,11 +1780,26 @@ extern "C" void integrateDepthMapIntoBlocksCUDA(
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         printf("CUDA integration kernel error: %s\n", cudaGetErrorString(err));
-        return;
+        return 0.0f;
     }
 
-    printf("integrateDepthMapIntoBlocksCUDA: Integration completed successfully! (%.3f ms)\n", kernelElapsedMs);
-    printf("  Integrated SDF data into %d active blocks\n", numActiveBlocks);
-    printf("  Total voxels updated: %d (%d voxels per block)\n", numActiveBlocks * (int)threadsPerBlock, threadsPerBlock);
+    // printf("integrateDepthMapIntoBlocksCUDA: Integration completed successfully! (%.3f ms)\n", kernelElapsedMs);
+    // printf("  Integrated SDF data into %d active blocks\n", numActiveBlocks);
+    // printf("  Total voxels updated: %d (%d voxels per block)\n", numActiveBlocks * (int)threadsPerBlock, threadsPerBlock);
     printGpuMemoryUsage("After integrateDepthMapIntoBlocks kernel");
+    
+    return kernelElapsedMs;
+}
+
+
+
+extern "C" void resetHasMutexCUDA(CUDAHashRef & hashData, const Params & hashParams) {
+
+    const dim3 gridSize((hashParams.hashSlotNum + (T_PER_BLOCK * T_PER_BLOCK) - 1) / (T_PER_BLOCK * T_PER_BLOCK), 1);
+    const dim3 blockSize((T_PER_BLOCK * T_PER_BLOCK), 1);
+
+    resetHashMutexKernel << <gridSize, blockSize >> > (hashData, hashParams.hashSlotNum);
+
+
+
 }
