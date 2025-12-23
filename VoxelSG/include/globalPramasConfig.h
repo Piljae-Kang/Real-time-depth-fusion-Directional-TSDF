@@ -20,6 +20,10 @@ struct vec3f {
     vec3f operator-(const vec3f& other) const {
         return vec3f(x - other.x, y - other.y, z - other.z);
     }
+    
+    vec3f operator*(float scalar) const {
+        return vec3f(x * scalar, y * scalar, z * scalar);
+    }
 };
 
 struct vec3i {

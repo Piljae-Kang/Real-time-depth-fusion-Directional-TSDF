@@ -38,6 +38,15 @@ CUDAHashRef::CUDAHashRef()
 
 // NOTE: Ensure the header declares this as: `void HashDataAllocation(const Params);`
 void CUDAHashRef::HashDataAllocation(const Params params) {
+    // Get memory state BEFORE allocation
+    size_t freeBytesBefore = 0;
+    size_t totalBytesBefore = 0;
+    cudaError_t infoErrBefore = cudaMemGetInfo(&freeBytesBefore, &totalBytesBefore);
+    double usedGBBefore = 0.0;
+    if (infoErrBefore == cudaSuccess) {
+        usedGBBefore = (totalBytesBefore - freeBytesBefore) * (1.0 / (1024.0 * 1024.0 * 1024.0));
+    }
+    
     // The actual sizes depend on your hashing scheme. Here we allocate
     // conservative buffers based on available Params fields.
     size_t totalAllocatedBytes = 0;
@@ -46,7 +55,10 @@ void CUDAHashRef::HashDataAllocation(const Params params) {
     size_t hash_table_bytes = static_cast<size_t>(params.totalHashSize) * sizeof(HashSlot);
     if (hash_table_bytes > 0) {
         checkCuda(cudaMalloc(reinterpret_cast<void**>(&d_hashTable), hash_table_bytes));
-        checkCuda(cudaMemset(d_hashTable, 0, hash_table_bytes));
+        // Initialize to -1 (0xFF) so ptr = HASH_SLOT_FREE (-1) for all slots
+        // This matches deletion: slot->ptr = HASH_SLOT_FREE
+        // cudaMemset with 0xFF sets all bytes to 0xFF, which is -1 for int types
+        checkCuda(cudaMemset(d_hashTable, 0xFF, hash_table_bytes));
         logDeviceAlloc("HashTable", hash_table_bytes);
         totalAllocatedBytes += hash_table_bytes;
     }
@@ -103,7 +115,9 @@ void CUDAHashRef::HashDataAllocation(const Params params) {
 
     // Heap and heap counter — sizes are project-specific. Allocate minimal placeholders.
     // Adjust to your allocator design.
-    const size_t default_heap_capacity = static_cast<size_t>(params.SDFBlockNum);
+    // IMPORTANT: Expert code uses d_heap[addr+1] in appendHeap, so we need SDFBlockNum+1 size
+    // to avoid out-of-bounds access when storing at d_heap[SDFBlockNum]
+    const size_t default_heap_capacity = static_cast<size_t>(params.SDFBlockNum) + 1;  // +1 for expert code compatibility
     if (default_heap_capacity > 0) {
         checkCuda(cudaMalloc(reinterpret_cast<void**>(&d_heap), default_heap_capacity * sizeof(unsigned int)));
         checkCuda(cudaMemset(d_heap, 0, default_heap_capacity * sizeof(unsigned int)));
@@ -143,17 +157,23 @@ void CUDAHashRef::HashDataAllocation(const Params params) {
         totalAllocatedBytes,
         totalAllocatedBytes * toGB);
 
-    size_t freeBytes = 0;
-    size_t totalBytes = 0;
-    cudaError_t infoErr = cudaMemGetInfo(&freeBytes, &totalBytes);
-    if (infoErr == cudaSuccess) {
-        double usedGB = (totalBytes - freeBytes) * toGB;
+    // Get memory state AFTER allocation
+    size_t freeBytesAfter = 0;
+    size_t totalBytesAfter = 0;
+    cudaError_t infoErrAfter = cudaMemGetInfo(&freeBytesAfter, &totalBytesAfter);
+    if (infoErrAfter == cudaSuccess) {
+        double usedGBAfter = (totalBytesAfter - freeBytesAfter) * toGB;
+        double actualDeltaGB = usedGBAfter - usedGBBefore;
         printf("[GPU MEM ] Device total %.3f GB, used %.3f GB, free %.3f GB\n",
-            totalBytes * toGB,
-            usedGB,
-            freeBytes * toGB);
+            totalBytesAfter * toGB,
+            usedGBAfter,
+            freeBytesAfter * toGB);
+        printf("[GPU MEM ] Memory before allocation: %.3f GB used\n", usedGBBefore);
+        printf("[GPU MEM ] Memory after allocation:  %.3f GB used (delta: %.3f GB)\n", 
+            usedGBAfter, actualDeltaGB);
+        printf("[GPU MEM ] Note: Total GPU usage includes CUDA context, drivers, and other components\n");
     } else {
-        printf("[GPU MEM ] cudaMemGetInfo failed (%s)\n", cudaGetErrorString(infoErr));
+        printf("[GPU MEM ] cudaMemGetInfo failed (%s)\n", cudaGetErrorString(infoErrAfter));
     }
 }
 

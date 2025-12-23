@@ -14,6 +14,15 @@
 
 // #define USING_HUBITZ_DEPTHMAP
 
+// Enable/Disable streaming functionality
+// Set to 1 to enable multi-threaded streaming (GPU↔CPU block management)
+// Set to 0 to disable streaming (all blocks stay in GPU memory)
+#define ENABLE_STREAMING 0
+
+#if ENABLE_STREAMING
+#include "../include/VoxelStreamingManager.h"
+#endif
+
 int main() {
 
 
@@ -24,17 +33,17 @@ int main() {
 
 #ifdef HUBITZ_DATA_NEW
     
-    //std::string data_name = "scan_20251124_150352.887"; // teeth 1
+    // std::string data_name = "scan_20251124_150352.887"; // teeth 1
      
     // std::string data_name = "scan_20251125_110032.152"; // teeth 2
 
     // std::string data_name = "scan_20251126_151102.503"; // teeth 3
 
-    // std::string data_name = "scan_20251126_195334.652"; // teeth 400 framesssssssssssssssssssssssssssssssssssssssss
+    std::string data_name = "scan_20251126_195334.652"; // teeth 400 framesssssssssssssssssssssssssssssssssssssssss
 
     // std::string data_name = "scan_20251127_103912.743"; // front teeth 400 frame
 
-    std::string data_name = "scan_20251127_152736.862"; // whole teeth 1000 frame
+    // std::string data_name = "scan_20251127_152736.862"; // whole teeth 1000 frame
 
     // std::string data_name = "scan_20251125_144629.196"; // Thin object
 
@@ -150,6 +159,29 @@ int main() {
     std::cout << "VoxelScene created successfully" << std::endl;
     scene.printStats();
 
+#if ENABLE_STREAMING
+    // Initialize VoxelStreamingManager
+    std::cout << "\n=== Initializing VoxelStreamingManager ===" << std::endl;
+    const auto& gpc = GlobalParamsConfig::get();
+    vec3f voxelExtents = vec3f(
+        gpc.g_streamingVoxelExtents.x,
+        gpc.g_streamingVoxelExtents.y,
+        gpc.g_streamingVoxelExtents.z
+    );
+    vec3i gridDimensions = gpc.g_streamingGridDimensions;
+    vec3i minGridPos = gpc.g_streamingMinGridPos;
+    unsigned int initialChunkListSize = 1000;  // Initial size for chunk vectors
+    bool streamingEnabled = true;  // Enable multi-threaded streaming
+    
+    VoxelStreamingManager streamingManager(
+        scene, params, voxelExtents, gridDimensions, minGridPos,
+        initialChunkListSize, streamingEnabled
+    );
+    std::cout << "VoxelStreamingManager initialized successfully" << std::endl;
+#else
+    std::cout << "\n=== Streaming DISABLED (all blocks stay in GPU memory) ===" << std::endl;
+#endif
+
     const std::string runOutputDir = scene.getOutputDirectory();
         
     // === Custom Depth Map Generation Example ===
@@ -164,8 +196,8 @@ int main() {
     // Get all point cloud frames (now supports multiple frames)
     const auto& allPointCloudFrames = loader.getAllPointCloudParams();
 
-    // Limit test_idx to actual available frames
-    int test_idx = (std::min)(1000, static_cast<int>(allPointCloudFrames.size()));
+    // Limit test_idx to actual available frames : loader frame = test_idx
+    int test_idx = (std::min)(loader.frame_idx, static_cast<int>(allPointCloudFrames.size()));
     //int test_idx = (std::min)(1, static_cast<int>(allPointCloudFrames.size()));
     if (test_idx == 0) {
         std::cerr << "No point cloud frames available!" << std::endl;
@@ -468,13 +500,62 @@ int main() {
                     // Use global truncation distance
                     float truncationDistance = GlobalParamsConfig::get().g_SDFTruncation;  // Use fixed value for now
 
+#if ENABLE_STREAMING
+                    // Extract camera position from transform matrix
+                    vec3f cameraPos = vec3f(
+                        cameraPoseMatrix.at<float>(0, 3),
+                        cameraPoseMatrix.at<float>(1, 3),
+                        cameraPoseMatrix.at<float>(2, 3)
+                    );
+                    
+                    // Extract camera view direction (pose matrix's Z axis = camera forward direction)
+                    // Note: If cameraPoseMatrix is camera-to-world, Z axis is forward. If world-to-camera, -Z is forward.
+                    vec3f viewDir = vec3f(
+                        cameraPoseMatrix.at<float>(0, 2),  // Z direction (camera-to-world transform)
+                        cameraPoseMatrix.at<float>(1, 2),
+                        cameraPoseMatrix.at<float>(2, 2)
+                    );
+                    
+                    // Calculate sphere center: 100m ahead of camera in view direction
+                    vec3f sphereCenter = cameraPos + viewDir * 110.0f;
+                    
+                    // Streaming radius (same for both stream out and stream in)
+                    // Both use sphere center (100m ahead of camera) with the same radius
+                    float streamingRadius = 10.0f;  // 10m radius from sphere center
+                    
+                    bool useParts = true;  // Use parts for streaming out (divide work across frames)
+                    
+                    // Update sphere center and radius for auxiliary thread (stream in)
+                    // (Auxiliary thread will call streamInCopyToGPUBuffer using these values)
+                    streamingManager.posCamera_ = sphereCenter;  // Use sphere center (100m ahead)
+                    streamingManager.radius_ = streamingRadius;   // Same radius for both stream out and stream in
+                    
+                    // ===================================================================
+                    // STREAMING: Stream out blocks from GPU to CPU (before integration)
+                    // Main thread: Find blocks to stream out (auxiliary thread will copy to CPU)
+                    // (Like expert code: streamOutToCPUPass0GPU is called before integration)
+                    // Stream out uses sphere center (100m ahead) with streamingRadius
+                    // ===================================================================
+                    std::cout << "\n=== Streaming Out (GPU->CPU) - Find Blocks ===\n";
+                    streamingManager.m_frameNumber = i;  // Set frame number for .xyz file naming
+                    streamingManager.m_outputDirectory = runOutputDir;  // Set output directory for .xyz files
+                    streamingManager.streamOutFindBlocksOnGPU(sphereCenter, streamingRadius, useParts, true);
+                    
+                    // ===================================================================
+                    // STREAMING: Stream in blocks from CPU to GPU (before integration)
+                    // Main thread: Only insert to hash table (auxiliary thread does the CPU→GPU copy)
+                    // (Like expert code: streamInToGPUPass1GPU is called before integration)
+                    // Stream in uses sphereCenter (100m ahead) with streamInRadius (10m)
+                    // ===================================================================
+                    std::cout << "\n=== Streaming In (CPU->GPU) - Insert to Hash ===\n";
+                    streamingManager.streamInInsertToHashTable(true);
+#endif
+                    
                     // Debug: Check if GPU pointers are valid before calling integrateFromScanData
                     std::cout << "  Debug: Before integrateFromScanData call:" << std::endl;
                     std::cout << "    d_depthmap=" << (void*)d_depthmap << ", d_colormap=" << (void*)d_colormap
                         << ", d_normalmap=" << (void*)d_normalmap << std::endl;
                     std::cout << "    depthWidth=" << depthWidth << ", depthHeight=" << depthHeight << std::endl;
-
-
 
                     scene.integrateFromScanData(
                         d_depthmap, d_colormap, d_normalmap,
@@ -639,6 +720,12 @@ int main() {
         std::cerr << "Error during VoxelScene processing: " << e.what() << std::endl;
         return -1;
     }
+    
+#if ENABLE_STREAMING
+    // Stop streaming thread before cleanup
+    std::cout << "\n=== Stopping Streaming Thread ===" << std::endl;
+    streamingManager.stopMultiThreading();
+#endif
     
     std::cout << "\n=== Program Completed Successfully ===" << std::endl;
 

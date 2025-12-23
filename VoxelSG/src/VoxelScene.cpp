@@ -9,8 +9,13 @@
 #include <cuda_runtime.h>
 #include <filesystem>
 #include <system_error>
+#include <set>
+#include <tuple>
+#include <vector>
 
-#define SAVE_VOXEL_TO_XYZ
+// Define to enable saving active blocks to xyz files
+// Set to 0 to disable xyz file saving (saves disk I/O)
+#define SAVE_ACTIVE_BLOCKS_TO_XYZ 1
 
 namespace fs = std::filesystem;
 
@@ -23,6 +28,38 @@ namespace fs = std::filesystem;
                       << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
         } \
     } while(0)
+
+// Helper function to write heap/block log to file
+static void writeHeapBlockLog(const std::string& outputDir, int frameNumber, 
+                              const std::string& phase, 
+                              unsigned int heapCounter, unsigned int initialHeapCounter,
+                              unsigned int totalAllocated, unsigned int activeBlocks,
+                              unsigned int newlyAllocated = 0) {
+    if (outputDir.empty()) return;
+    
+    fs::path logPath = fs::path(outputDir) / "heap_block_log.txt";
+    std::ofstream logFile(logPath, std::ios::app);  // Append mode
+    
+    if (!logFile.is_open()) {
+        std::cerr << "Failed to open log file: " << logPath << std::endl;
+        return;
+    }
+    
+    // Write header for first entry
+    static bool headerWritten = false;
+    if (!headerWritten) {
+        logFile << "Frame\tPhase\tHeapCounter\tInitialCounter\tTotalAllocated\tActiveBlocks\tNewlyAllocated\tFreeBlocks\n";
+        headerWritten = true;
+    }
+    
+    unsigned int freeBlocks = heapCounter + 1;
+    logFile << frameNumber << "\t" << phase << "\t" 
+            << heapCounter << "\t" << initialHeapCounter << "\t"
+            << totalAllocated << "\t" << activeBlocks << "\t"
+            << newlyAllocated << "\t" << freeBlocks << "\n";
+    
+    logFile.close();
+}
 
 /**
  * Constructor: Initialize VoxelScene
@@ -445,6 +482,13 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
     float compactTime = 0.0f;
     float integrateTime = 0.0f;
     
+    // Get heap counter before allocation for logging
+    unsigned int heapCounterBeforeAlloc = 0;
+    CUDA_CHECK(cudaMemcpy(&heapCounterBeforeAlloc, m_hashData.d_heapCounter, 
+                          sizeof(unsigned int), cudaMemcpyDeviceToHost));
+    unsigned int initialHeapCounter = m_params.SDFBlockNum - 1;
+    unsigned int totalAllocatedBefore = initialHeapCounter - heapCounterBeforeAlloc;
+    
     // Step 1: Allocate blocks based on depthmap
     std::cout << "  Step 1: Allocating blocks..." << std::endl;
     allocTime = allocBlocksFromDepthMapCUDA(
@@ -460,10 +504,189 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
     );
     totalKernelTime += allocTime;
     
+    // Get heap counter after allocation for logging
+    unsigned int heapCounterAfterAlloc = 0;
+    CUDA_CHECK(cudaMemcpy(&heapCounterAfterAlloc, m_hashData.d_heapCounter, 
+                          sizeof(unsigned int), cudaMemcpyDeviceToHost));
+    unsigned int totalAllocatedAfter = initialHeapCounter - heapCounterAfterAlloc;
+    // NOTE: newlyAllocated from heap counter is approximate (includes streaming in blocks)
+    // Actual newly allocated blocks will be calculated after compactify by comparing active blocks
+    unsigned int newlyAllocated = heapCounterBeforeAlloc - heapCounterAfterAlloc;
+    
+    // Log allocation to file (with approximate newlyAllocated, will be updated after compactify)
+    writeHeapBlockLog(m_outputDirectory, static_cast<int>(m_numIntegratedFrames), 
+                     "ALLOCATION", heapCounterAfterAlloc, initialHeapCounter,
+                     totalAllocatedAfter, 0, newlyAllocated);
+    
     // Step 2: Compactify hash entries (optional, for efficiency)
     std::cout << "  Step 2: Compactifying hash entries..." << std::endl;
     compactTime = compactifyHashCUDA(m_hashData, m_params);
     totalKernelTime += compactTime;
+    
+    // Get active blocks count and heap counter after compactify for logging
+    int numActiveBlocks = 0;
+    CUDA_CHECK(cudaMemcpy(&numActiveBlocks, m_hashData.d_hashCompactifiedCounter,
+                          sizeof(int), cudaMemcpyDeviceToHost));
+    unsigned int heapCounterAfterCompact = 0;
+    CUDA_CHECK(cudaMemcpy(&heapCounterAfterCompact, m_hashData.d_heapCounter,
+                          sizeof(unsigned int), cudaMemcpyDeviceToHost));
+    unsigned int totalAllocatedAfterCompact = initialHeapCounter - heapCounterAfterCompact;
+    
+    // Log compactify to file
+    writeHeapBlockLog(m_outputDirectory, static_cast<int>(m_numIntegratedFrames),
+                     "COMPACTIFY", heapCounterAfterCompact, initialHeapCounter,
+                     totalAllocatedAfterCompact, static_cast<unsigned int>(numActiveBlocks), 0);
+    
+    // Save newly allocated blocks to xyz file
+    if (numActiveBlocks > 0 && !m_outputDirectory.empty()) {
+        // Read current active blocks from compactified hash table
+        std::vector<HashSlot> currentActiveBlocks(numActiveBlocks);
+        CUDA_CHECK(cudaMemcpy(currentActiveBlocks.data(), m_hashData.d_CompactifiedHashTable,
+                              sizeof(HashSlot) * numActiveBlocks, cudaMemcpyDeviceToHost));
+        
+        // Static variable to store previous frame's active blocks
+        static std::set<std::tuple<int, int, int>> previousActiveBlocks;
+        
+        // Find newly allocated blocks (blocks that exist in current but not in previous)
+        std::vector<std::tuple<int, int, int>> newlyAllocatedBlocks;
+        for (int i = 0; i < numActiveBlocks; i++) {
+            const HashSlot& slot = currentActiveBlocks[i];
+            if (slot.ptr != -1) {  // Valid block
+                std::tuple<int, int, int> blockKey(slot.pos.x, slot.pos.y, slot.pos.z);
+                if (previousActiveBlocks.find(blockKey) == previousActiveBlocks.end()) {
+                    // This block is new (not in previous frame)
+                    newlyAllocatedBlocks.push_back(blockKey);
+                }
+            }
+        }
+        
+        // Calculate actual newly allocated blocks count (excluding streaming in blocks)
+        // This is the accurate count, not the heap counter difference
+        unsigned int actualNewlyAllocated = static_cast<unsigned int>(newlyAllocatedBlocks.size());
+        
+        // Update ALLOCATION log with actual newly allocated blocks count
+        // (This is more accurate than heap counter difference, which includes streaming in blocks)
+        if (m_numIntegratedFrames > 0) {
+            // Re-read the log file and update the last ALLOCATION entry
+            fs::path logPath = fs::path(m_outputDirectory) / "heap_block_log.txt";
+            if (fs::exists(logPath)) {
+                // Read all lines
+                std::vector<std::string> lines;
+                std::ifstream logFile(logPath);
+                std::string line;
+                while (std::getline(logFile, line)) {
+                    lines.push_back(line);
+                }
+                logFile.close();
+                
+                // Find and update the last ALLOCATION entry
+                for (int i = static_cast<int>(lines.size()) - 1; i >= 0; i--) {
+                    if (lines[i].find("ALLOCATION") != std::string::npos && 
+                        lines[i].find("\t" + std::to_string(m_numIntegratedFrames) + "\t") != std::string::npos) {
+                        // Parse the line and replace NewlyAllocated column
+                        std::istringstream iss(lines[i]);
+                        std::vector<std::string> tokens;
+                        std::string token;
+                        while (std::getline(iss, token, '\t')) {
+                            tokens.push_back(token);
+                        }
+                        
+                        if (tokens.size() >= 7) {
+                            // Update NewlyAllocated column (index 6)
+                            tokens[6] = std::to_string(actualNewlyAllocated);
+                            
+                            // Reconstruct the line
+                            std::ostringstream oss;
+                            for (size_t j = 0; j < tokens.size(); j++) {
+                                if (j > 0) oss << "\t";
+                                oss << tokens[j];
+                            }
+                            lines[i] = oss.str();
+                        }
+                        break;
+                    }
+                }
+                
+                // Write back all lines
+                std::ofstream logFileOut(logPath);
+                for (const auto& l : lines) {
+                    logFileOut << l << "\n";
+                }
+                logFileOut.close();
+            }
+        }
+        
+#if SAVE_ACTIVE_BLOCKS_TO_XYZ
+        // Save newly allocated blocks to xyz file
+        if (!newlyAllocatedBlocks.empty()) {
+            fs::path debugDir = fs::path(m_outputDirectory) / "allocation_debugging";
+            fs::create_directories(debugDir);
+            
+            std::stringstream filename;
+            filename << debugDir.string() << "/allocation_new_blocks_frame_" 
+                     << m_numIntegratedFrames << ".xyz";
+            
+            std::ofstream xyzFile(filename.str());
+            if (xyzFile.is_open()) {
+                for (const auto& blockKey : newlyAllocatedBlocks) {
+                    int x = std::get<0>(blockKey);
+                    int y = std::get<1>(blockKey);
+                    int z = std::get<2>(blockKey);
+                    
+                    // Convert block coordinates to world position
+                    float blockExtent = static_cast<float>(SDF_BLOCK_SIZE) * m_params.voxelSize;
+                    float worldX = x * blockExtent;
+                    float worldY = y * blockExtent;
+                    float worldZ = z * blockExtent;
+                    
+                    xyzFile << worldX << " " << worldY << " " << worldZ << "\n";
+                }
+                xyzFile.close();
+                printf("[ALLOCATION] Saved %zu newly allocated block positions to %s (heap counter diff: %u, actual: %u)\n", 
+                       newlyAllocatedBlocks.size(), filename.str().c_str(),
+                       heapCounterBeforeAlloc - heapCounterAfterAlloc, actualNewlyAllocated);
+            }
+        }
+        
+        // Save all active blocks to xyz file (for debugging/visualization)
+        {
+            fs::path debugDir = fs::path(m_outputDirectory) / "allocation_debugging";
+            fs::create_directories(debugDir);
+            
+            std::stringstream filename;
+            filename << debugDir.string() << "/all_active_blocks_frame_" 
+                     << m_numIntegratedFrames << ".xyz";
+            
+            std::ofstream xyzFile(filename.str());
+            if (xyzFile.is_open()) {
+                for (int i = 0; i < numActiveBlocks; i++) {
+                    const HashSlot& slot = currentActiveBlocks[i];
+                    if (slot.ptr != -1) {  // Valid block
+                        // Convert block coordinates to world position
+                        float blockExtent = static_cast<float>(SDF_BLOCK_SIZE) * m_params.voxelSize;
+                        float worldX = slot.pos.x * blockExtent;
+                        float worldY = slot.pos.y * blockExtent;
+                        float worldZ = slot.pos.z * blockExtent;
+                        
+                        xyzFile << worldX << " " << worldY << " " << worldZ << "\n";
+                    }
+                }
+                xyzFile.close();
+                printf("[ALLOCATION] Saved %d all active block positions to %s\n", 
+                       numActiveBlocks, filename.str().c_str());
+            }
+        }
+#endif // SAVE_ACTIVE_BLOCKS_TO_XYZ
+        
+        // Update previous active blocks for next frame
+        previousActiveBlocks.clear();
+        for (int i = 0; i < numActiveBlocks; i++) {
+            const HashSlot& slot = currentActiveBlocks[i];
+            if (slot.ptr != -1) {
+                previousActiveBlocks.insert(std::make_tuple(slot.pos.x, slot.pos.y, slot.pos.z));
+            }
+        }
+    }
     
     // Step 3: Integrate depth map into allocated blocks
     std::cout << "  Step 3: Integrating depth map..." << std::endl;
@@ -490,11 +713,7 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
     std::cout << "  Total Kernel Time:         " << std::fixed << std::setprecision(3) << totalKernelTime << " ms" << std::endl;
     std::cout << "=====================================\n" << std::endl;
     
-    // Get active block count from compactified counter
-    int numActiveBlocks = 0;
-    cudaMemcpy(&numActiveBlocks, m_hashData.d_hashCompactifiedCounter, sizeof(int), cudaMemcpyDeviceToHost);
-    
-    // Calculate active voxel count and memory usage
+    // Calculate active voxel count and memory usage (numActiveBlocks already retrieved above)
     const int voxelsPerBlock = SDF_BLOCK_SIZE * SDF_BLOCK_SIZE * SDF_BLOCK_SIZE; // 8^3 = 512
     int numActiveVoxels = numActiveBlocks * voxelsPerBlock;
     size_t activeVoxelDataBytes = static_cast<size_t>(numActiveVoxels) * sizeof(VoxelData);
@@ -509,11 +728,8 @@ void VoxelScene::integrateFromScanData(const float3* depthmap, const uchar3* col
               << (activeVoxelDataBytes / (1024.0 * 1024.0)) << " MB"
               << " (" << activeVoxelDataBytes << " bytes)" << std::endl;
     
-    // Calculate total allocated blocks for comparison
-    unsigned int heapCounter = 0;
-    cudaMemcpy(&heapCounter, m_hashData.d_heapCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost);
-    unsigned int initialHeapCounter = m_params.SDFBlockNum - 1;
-    unsigned int totalAllocatedBlocks = initialHeapCounter - heapCounter;
+    // Calculate total allocated blocks for comparison (initialHeapCounter already declared above)
+    unsigned int totalAllocatedBlocks = initialHeapCounter - heapCounterAfterCompact;
     
     if (totalAllocatedBlocks > 0) {
         int totalAllocatedVoxels = totalAllocatedBlocks * voxelsPerBlock;

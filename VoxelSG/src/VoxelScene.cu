@@ -130,8 +130,9 @@ __device__ int allocBlockWithMeta(HashSlot* d_hashTable,
                                   bool debug = false);
 
 /**
- * Allocate a block in hash table (like expert code)
+ * Allocate a block in hash table (expert code algorithm)
  * Uses heap counter and heap array to get free block index
+ * Based on VoxelUtilHashSDF.h allocBlock implementation
  */
 __device__ int allocBlock(HashSlot* d_hashTable,
                           unsigned int* d_heap,
@@ -143,125 +144,84 @@ __device__ int allocBlock(HashSlot* d_hashTable,
                           int bucketSize,
                           int totalHashSize,
                           bool debug = false) {
-    unsigned int baseBucketId = hashBlockCoordinate(blockCoord, numBuckets);
-    unsigned int baseBucketStart = baseBucketId * bucketSize;
+    // Expert code: computeHashPos(pos) -> hash bucket
+    unsigned int h = hashBlockCoordinate(blockCoord, numBuckets);
+    unsigned int hp = h * bucketSize;  // hash position (start of bucket)
 
-    for (int retry = 0; retry < MAX_BUCKET_RETRY; ++retry) {
-        int firstEmpty = -1;
+    int firstEmpty = -1;
+    
+    // 1) Probe inside the hashed bucket (like expert code)
+    for (unsigned int j = 0; j < bucketSize; ++j) {
+        unsigned int i = j + hp;
+        const HashSlot& curr = d_hashTable[i];
 
-        // 1) Probe inside the hashed bucket
-        for (int j = 0; j < bucketSize; ++j) {
-            unsigned int slotIdx = baseBucketStart + j;
-            HashSlot* slot = &d_hashTable[slotIdx];
-            int ptr = slot->ptr;
-
-            if (ptr != HASH_SLOT_FREE &&
-                slot->pos.x == blockCoord.x &&
-                slot->pos.y == blockCoord.y &&
-                slot->pos.z == blockCoord.z) {
-                if (debug) printf("    -> Block already allocated at slot %u\n", slotIdx);
-                return ptr;
-            }
-
-            if (firstEmpty == -1 && ptr == HASH_SLOT_FREE) {
-                firstEmpty = slotIdx;
-            }
+        // Expert code: if already allocated and corresponds to current position -> exit
+        if (curr.pos.x == blockCoord.x && 
+            curr.pos.y == blockCoord.y && 
+            curr.pos.z == blockCoord.z && 
+            curr.ptr != HASH_SLOT_FREE) {
+            if (debug) printf("    -> Block already allocated at slot %u\n", i);
+            return curr.ptr;
         }
 
-        // 2) Fallback: linear probe over entire table (simple open addressing)
-        if (firstEmpty == -1) {
-            for (int i = bucketSize; i < totalHashSize; ++i) {
-                unsigned int slotIdx = (baseBucketStart + i) % totalHashSize;
-                HashSlot* slot = &d_hashTable[slotIdx];
-                int ptr = slot->ptr;
-
-                if (ptr != HASH_SLOT_FREE &&
-                    slot->pos.x == blockCoord.x &&
-                    slot->pos.y == blockCoord.y &&
-                    slot->pos.z == blockCoord.z) {
-                    if (debug) printf("    -> Block already allocated at slot %u (fallback)\n", slotIdx);
-                    return ptr;
-                }
-
-                if (ptr == HASH_SLOT_FREE) {
-                    firstEmpty = slotIdx;
-                    break;
-                }
-            }
-        }
-
-        if (firstEmpty == -1) {
-            if (debug) printf("    -> No empty slot found for coord=(%d,%d,%d)\n",
-                              blockCoord.x, blockCoord.y, blockCoord.z);
-            return -1;
-        }
-
-        unsigned int targetBucketId = firstEmpty / bucketSize;
-
-        bool lockAcquired = false;
-        for (int spin = 0; spin < MAX_BUCKET_SPIN; ++spin) {
-            int previous = atomicExch(&d_hashBucketMutex[targetBucketId], HASH_BUCKET_LOCKED);
-            if (previous == HASH_BUCKET_UNLOCKED) {
-                lockAcquired = true;
-                break;
-            }
-        }
-
-        if (!lockAcquired) {
-            continue; // retry with a new scan
-        }
-
-        HashSlot* targetSlot = &d_hashTable[firstEmpty];
-        int currentPtr = targetSlot->ptr;
-
-        // Slot might have been filled while we were spinning; double-check
-        if (currentPtr != HASH_SLOT_FREE) {
-            if (targetSlot->pos.x == blockCoord.x &&
-                targetSlot->pos.y == blockCoord.y &&
-                targetSlot->pos.z == blockCoord.z) {
-                // if (debug) printf("    -> Block already allocated at slot %d after locking\n", firstEmpty);
-                d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
-                return currentPtr;
-            }
-
-            d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
-            continue; // try again to find another empty slot
-        }
-
-        unsigned int heapIndex = atomicSub((unsigned int*)d_heapCounter, 1);
-        if (heapIndex > 0 && heapIndex < (unsigned int)SDFBlockNum) {
-            unsigned int blockIndex = d_heap[heapIndex];
-            targetSlot->pos = blockCoord;
-            targetSlot->offset = 0;
-            __threadfence();
-            targetSlot->ptr = static_cast<int>(blockIndex);
-            __threadfence();
-
-            // if (debug) {
-            //     printf("    -> Allocated block #%u from heap[%u] at slot %d, coord=(%d,%d,%d)\n",
-            //            blockIndex, heapIndex, firstEmpty,
-            //            blockCoord.x, blockCoord.y, blockCoord.z);
-            // }
-
-            d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
-            return static_cast<int>(blockIndex);
-        } else {
-            // Out of memory - restore counter and release lock
-            atomicAdd((unsigned int*)d_heapCounter, 1);
-            // if (debug) {
-            //     printf("    -> Out of memory! heapIndex=%u (must be > 0 and < %d)\n",
-            //            heapIndex, SDFBlockNum);
-            // }
-            d_hashBucketMutex[targetBucketId] = HASH_BUCKET_UNLOCKED;
-            return -1;
+        // Expert code: store the first FREE_ENTRY hash entry
+        if (firstEmpty == -1 && curr.ptr == HASH_SLOT_FREE) {
+            firstEmpty = i;
         }
     }
 
-    // if (debug) {
-    //     printf("    -> Failed to acquire bucket lock after %d retries for coord=(%d,%d,%d)\n",
-    //            MAX_BUCKET_RETRY, blockCoord.x, blockCoord.y, blockCoord.z);
-    // }
+    // 2) If found empty entry in bucket, allocate it (like expert code)
+    if (firstEmpty != -1) {
+        // Expert code: atomicExch(&d_hashBucketMutex[h], LOCK_ENTRY)
+        int prevValue = atomicExch(&d_hashBucketMutex[h], HASH_BUCKET_LOCKED);
+        
+        // Expert code: only proceed if the bucket has been locked (prevValue != LOCK_ENTRY means we got the lock)
+        if (prevValue != HASH_BUCKET_LOCKED) {
+            HashSlot& entry = d_hashTable[firstEmpty];
+            
+            // Expert code: consumeHeap() { uint addr = atomicSub(&d_heapCounter[0], 1); return d_heap[addr]; }
+            unsigned int heapIndex = atomicSub((unsigned int*)d_heapCounter, 1);
+            
+            // Range check: heapIndex should be valid
+            if (heapIndex <= (unsigned int)SDFBlockNum && heapIndex != 0xFFFFFFFF) {
+                unsigned int blockIndex = d_heap[heapIndex];
+                
+                // Expert code: entry.pos = pos; entry.offset = NO_OFFSET; entry.ptr = consumeHeap() * SDF_BLOCK_SIZE^3;
+                // Note: In our code, ptr stores block index directly (not voxel index)
+                entry.pos = blockCoord;
+                entry.offset = 0;
+                entry.ptr = static_cast<int>(blockIndex);
+                
+                if (debug) {
+                    printf("    -> Allocated block #%u from heap[%u] at slot %d, coord=(%d,%d,%d)\n",
+                           blockIndex, heapIndex, firstEmpty,
+                           blockCoord.x, blockCoord.y, blockCoord.z);
+                }
+                
+                // Expert code: lock is NOT released here (function returns with lock held)
+                // This matches expert code behavior - the lock remains held
+                return static_cast<int>(blockIndex);
+            } else {
+                // Out of memory - restore counter
+                atomicAdd((unsigned int*)d_heapCounter, 1);
+                if (debug) {
+                    printf("    -> Out of memory! heapIndex=%u (must be <= %d)\n",
+                           heapIndex, SDFBlockNum);
+                }
+                // Release lock before returning (expert code doesn't explicitly release, but we do for safety)
+                d_hashBucketMutex[h] = HASH_BUCKET_UNLOCKED;
+                return -1;
+            }
+        }
+        // Bucket was already locked - return failure (expert code returns without allocating)
+        return -1;
+    }
 
+    // 3) No empty slot in bucket - return failure (expert code handles collisions separately)
+    if (debug) {
+        printf("    -> No empty slot found in bucket for coord=(%d,%d,%d)\n",
+               blockCoord.x, blockCoord.y, blockCoord.z);
+    }
     return -1;
 }
 
@@ -272,14 +232,15 @@ __device__ int allocBlock(HashSlot* d_hashTable,
 /**
  * Initialize hash table kernel
  */
-__global__ void initHashTableKernel(HashSlot* d_hashTable, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        d_hashTable[idx].pos = make_int3(-1, -1, -1);
-        d_hashTable[idx].ptr = -1;
-        d_hashTable[idx].offset = 0;
-    }
-}
+
+//__global__ void initHashTableKernel(HashSlot* d_hashTable, int size) {
+//    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//    if (idx < size) {
+//        d_hashTable[idx].pos = make_int3(-1, -1, -1);
+//        d_hashTable[idx].ptr = -1;
+//        d_hashTable[idx].offset = 0;
+//    }
+//}
 
 /**
  * Initialize heap kernel (like expert code)
@@ -292,6 +253,36 @@ __global__ void initHeapKernel(unsigned int* d_heap, int numBlocks) {
         d_heap[idx] = numBlocks - idx - 1;  // Reverse order: last element first
     }
 }
+
+
+/**
+ * Initialize hash table to empty (all slots free)
+ */
+__global__ void initHashTableKernel(HashSlot* d_hashTable, int totalHashSize) {
+    const unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < (unsigned int)totalHashSize) {
+        // Initialize to free (already done by cudaMemset(0xFF) in HashDataAllocation)
+        // But we can explicitly set it here for clarity
+        d_hashTable[idx].ptr = HASH_SLOT_FREE;
+        d_hashTable[idx].pos = make_int3(0, 0, 0);
+        d_hashTable[idx].offset = 0;
+    }
+}
+
+/**
+ * Reset hash bucket mutexes (like expert code)
+ * Expert code: resetHashBucketMutexKernel sets mutex to FREE_ENTRY (-2)
+ * We use HASH_BUCKET_UNLOCKED (0) instead
+ */
+__global__ void resetHashBucketMutexKernel(int* d_hashBucketMutex, int numBuckets) {
+    const unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx < (unsigned int)numBuckets) {
+        d_hashBucketMutex[idx] = HASH_BUCKET_UNLOCKED;
+    }
+}
+
 
 /**
  * Improved allocation kernel using 3D DDA algorithm (like expert code)
@@ -439,7 +430,10 @@ __device__ void allocateBlocksAlongRay(
         // if (shouldDebug) {
         //     printf("  Before allocBlock: iter=%d, blockCoord=(%d,%d,%d)\n", iter, blockCoord.x, blockCoord.y, blockCoord.z);
         // }
-        int blockPtr = allocBlockWithMeta(d_hashTable,
+
+
+        // int blockPtr = allocBlockWithMeta(d_hashTable,
+        int blockPtr = allocBlock(d_hashTable,
                    d_heap,
                    d_heapCounter,
                    d_hashBucketMutex,
@@ -1177,15 +1171,33 @@ extern "C" void resetHashDataCUDA(CUDAHashRef & hashData, const Params & params)
         int blockSize = 256;
         int numBlocks = (params.SDFBlockNum + blockSize - 1) / blockSize;
         
+        printf("resetHashDataCUDA: Initializing heap array (SDFBlockNum=%d, numBlocks=%d, blockSize=%d)\n", 
+               params.SDFBlockNum, numBlocks, blockSize);
+        
         // Launch kernel
         initHeapKernel << <numBlocks, blockSize >> > (hashData.d_heap, params.SDFBlockNum);
+        
+        // Check for kernel launch errors
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            printf("[ERROR] resetHashDataCUDA: initHeapKernel launch failed: %s\n", cudaGetErrorString(err));
+        }
         
         // Wait for kernel to complete before setting counter
         cudaDeviceSynchronize();
         
+        // Verify heap initialization by reading a few values
+        unsigned int heapSample[5];
+        cudaMemcpy(heapSample, hashData.d_heap, sizeof(unsigned int) * 5, cudaMemcpyDeviceToHost);
+        printf("resetHashDataCUDA: Heap sample (first 5): [%u, %u, %u, %u, %u]\n", 
+               heapSample[0], heapSample[1], heapSample[2], heapSample[3], heapSample[4]);
+        
         // Set heap counter to max (all blocks are free)
         unsigned int maxCount = params.SDFBlockNum - 1;
         cudaMemcpy(hashData.d_heapCounter, &maxCount, sizeof(unsigned int), cudaMemcpyHostToDevice);
+        printf("resetHashDataCUDA: Set heapCounter to %u (SDFBlockNum-1)\n", maxCount);
+    } else {
+        printf("[ERROR] resetHashDataCUDA: d_heap or d_heapCounter is nullptr!\n");
     }
     
     // Initialize hash table to empty
@@ -1197,9 +1209,11 @@ extern "C" void resetHashDataCUDA(CUDAHashRef & hashData, const Params & params)
         initHashTableKernel << <numBlocks, blockSize >> > (hashData.d_hashTable, params.totalHashSize);
     }
 
-    // Reset bucket mutexes
+    // Reset bucket mutexes (like expert code: resetHashBucketMutexKernel)
     if (hashData.d_hashBucketMutex) {
-        cudaMemset(hashData.d_hashBucketMutex, HASH_BUCKET_UNLOCKED, params.hashSlotNum * sizeof(int));
+        int blockSize = 256;
+        int numBlocks = (params.hashSlotNum + blockSize - 1) / blockSize;
+        resetHashBucketMutexKernel << <numBlocks, blockSize >> > (hashData.d_hashBucketMutex, params.hashSlotNum);
     }
     
     // Initialize compactified hash table
@@ -1425,6 +1439,15 @@ extern "C" float allocBlocksFromDepthMapMethod1CUDA(
 
     printGpuMemoryUsage("Before Method1 allocation");
 
+    // Expert code: Reset hash bucket mutexes before allocation
+    // This is critical because allocBlock doesn't release locks (expert code behavior)
+    if (hashData.d_hashBucketMutex) {
+        int mutexBlockSize = 256;
+        int mutexNumBlocks = (params.hashSlotNum + mutexBlockSize - 1) / mutexBlockSize;
+        resetHashBucketMutexKernel << <mutexNumBlocks, mutexBlockSize >> > (hashData.d_hashBucketMutex, params.hashSlotNum);
+        cudaDeviceSynchronize(); // Ensure mutex reset completes before allocation
+    }
+
     // Read heap counter BEFORE allocation to track newly allocated blocks
     unsigned int heapCounterBefore = 0;
     cudaMemcpy(&heapCounterBefore, hashData.d_heapCounter, sizeof(unsigned int), cudaMemcpyDeviceToHost);
@@ -1574,6 +1597,15 @@ extern "C" float allocBlocksFromDepthMapMethod2CUDA(
     // printf("  Grid size: %d, Block size: %d\n", gridSize.x, blockSize.x);
 
     printGpuMemoryUsage("Before Method2 allocation");
+
+    // Expert code: Reset hash bucket mutexes before allocation
+    // This is critical because allocBlock doesn't release locks (expert code behavior)
+    if (hashData.d_hashBucketMutex) {
+        int mutexBlockSize = 256;
+        int mutexNumBlocks = (params.hashSlotNum + mutexBlockSize - 1) / mutexBlockSize;
+        resetHashBucketMutexKernel << <mutexNumBlocks, mutexBlockSize >> > (hashData.d_hashBucketMutex, params.hashSlotNum);
+        cudaDeviceSynchronize(); // Ensure mutex reset completes before allocation
+    }
 
     cudaEvent_t startEvent = nullptr;
     cudaEvent_t stopEvent = nullptr;
